@@ -48,7 +48,7 @@ Ajudar estudantes a organizar ideias, encontrar repertórios e compreender a qua
 - **Frontend:** HTML5, CSS3 e JavaScript puro (sem frameworks, sem módulos ES, script carregado com `defer`);
 - **Backend:** Node.js com módulos nativos `node:http`, `node:fs` e `node:path`;
 - **API de IA:** Google Gemini (`generativelanguage.googleapis.com/v1beta`, método `generateContent`), chamada via `fetch` nativo;
-- **Modelo padrão:** `gemini-2.5-flash` (configurável);
+- **Modelo padrão:** `gemini-3.8-flash` (configurável). O `gemini-2.5-flash` não está mais disponível para chaves novas (o Google responde 404);
 - **Testes:** executor nativo `node:test` com `node:assert/strict`;
 - **Hospedagem local:** servidor Node.js na porta 3000 por padrão.
 
@@ -63,7 +63,7 @@ affonso/
 ├── script.js               # dados da biblioteca, renderização, busca, modal e integração com a API (~930 linhas)
 ├── server.js               # servidor HTTP, estáticos, validações, prompts e integração com Gemini (~480 linhas)
 ├── test/
-│   └── entrelinhas.test.js # testes automatizados do backend (15 casos)
+│   └── entrelinhas.test.js # testes automatizados do backend (30 casos)
 ├── package.json            # metadados, engine e scripts start/test
 ├── .env.example            # modelo de variáveis de ambiente
 ├── .gitignore              # ignora .env e node_modules/
@@ -84,7 +84,7 @@ Copie `.env.example` para `.env` na raiz do projeto:
 
 ```env
 GEMINI_API_KEY=cole_sua_chave_aqui
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.8-flash
 PORT=3000
 ENTRELINHAS_TEST_MODE=false
 ```
@@ -92,7 +92,7 @@ ENTRELINHAS_TEST_MODE=false
 | Variável | Obrigatória | Padrão | Função |
 |---|---|---|---|
 | `GEMINI_API_KEY` | Sim, para correção real | — | Chave enviada ao Gemini no cabeçalho `x-goog-api-key`. |
-| `GEMINI_MODEL` | Não | `gemini-2.5-flash` | Modelo usado nas duas chamadas. |
+| `GEMINI_MODEL` | Não | `gemini-3.8-flash` | Modelo usado nas duas chamadas. |
 | `PORT` | Não | `3000` | Porta do servidor HTTP. |
 | `ENTRELINHAS_TEST_MODE` | Não | `false` | Quando `true`, retorna uma avaliação fixa de demonstração sem chamar o Gemini. |
 
@@ -153,7 +153,8 @@ Servidor HTTP nativo que atende:
 - `validateInput`, `validateAssessment`, `validateProofreading`;
 - `parseCandidate`;
 - `createTestAssessment`;
-- `setTestConfiguration({ apiKey, model, testMode })` para alterar a configuração em tempo de execução.
+- `normalizarAvaliacao`, `normalizarRevisao`, `responseSchema`, `proofreadingSchema` e `tempoLimitePadrao`;
+- `setTestConfiguration({ apiKey, model, testMode, fetch, tempoLimite })` para alterar a configuração em tempo de execução. `fetch` substitui o fetch usado nas chamadas ao Gemini (`null` restaura o real); `tempoLimite` recebe `{ avaliacao, revisao }` em ms (`null` restaura os padrões).
 
 ## 7. Estrutura da interface
 
@@ -185,7 +186,7 @@ Ações:
 - **Avaliar redação**: valida os campos (primeiro a redação, depois a proposta), envia a requisição e exibe o resultado;
 - **Copiar versão revisada**: copia o `correctedText` para a área de transferência.
 
-Durante a avaliação: botão desabilitado com texto "Avaliando...", status "Avaliando as competências e fazendo uma segunda revisão ortográfica...", `aria-busy="true"` no painel e timeout de 95 segundos no navegador (`AbortController`).
+Durante a avaliação: botão desabilitado com texto "Avaliando...", status "Avaliando as competências e fazendo uma segunda revisão ortográfica...", `aria-busy="true"` no painel e timeout de 240 segundos no navegador (`AbortController`), maior que a soma dos limites do servidor.
 
 O painel de resultado apresenta, nesta ordem:
 
@@ -377,7 +378,21 @@ No modo de demonstração a resposta inclui também `"testMode": true`.
 
 ## 10. Processo de avaliação da IA
 
-Ambas as chamadas usam `system_instruction` com o prompt, o conteúdo do usuário serializado como JSON, `responseMimeType: "application/json"`, `responseSchema` próprio, `temperature: 0.2` e `maxOutputTokens: 6000`, compartilhando um único `AbortController` com limite de 90 segundos (2 × 45 s).
+Ambas as chamadas passam pela função `chamarGemini` e usam `system_instruction` com o prompt, o conteúdo do usuário serializado como JSON, `responseMimeType: "application/json"`, `responseSchema` próprio e `temperature: 0.2`. A chave vai no cabeçalho `x-goog-api-key`, nunca na URL.
+
+| Etapa | Gemini 3.x (`thinkingLevel`) | Gemini 2.5 (`thinkingBudget`) | `maxOutputTokens` | Limite de tempo |
+|---|---|---|---|---|
+| Avaliação | `"low"` | 1.024 | 24.576 | 120 s |
+| Revisão | `"low"` | 512 | 16.384 | 90 s |
+
+- **Raciocínio (thinking):** nos modelos Gemini 2.5 e 3.x, os tokens de raciocínio contam dentro de `maxOutputTokens`. O parâmetro é escolhido por `montarConfiguracaoRaciocinio` conforme o nome do modelo:
+  - `gemini-3*` (incluindo o padrão `gemini-3.8-flash`): `thinkingConfig.thinkingLevel`. Os valores aceitos são `low`, `medium` e `high`; `minimal` não é aceito no 3.8. O nível não é um teto rígido, por isso `maxOutputTokens` tem bastante folga (o limite do 3.8-flash é 65.536);
+  - `gemini-2.5*`: `thinkingConfig.thinkingBudget` em tokens (512 é o mínimo do `2.5-flash-lite` e vale para flash e pro);
+  - outros nomes (por exemplo, `gemini-flash-latest`): nenhum `thinkingConfig`.
+- **Medição real com `gemini-3.8-flash` (19/11/2026):** o schema e o `thinkingLevel: "low"` foram aceitos (HTTP 200, `finishReason: STOP`). A avaliação usou de 1.300 a 1.650 tokens de resposta e a revisão cerca de 150, muito abaixo dos limites, sem corte por `MAX_TOKENS`. Sob alta demanda, porém, a avaliação levou de 60 a 100 s e a revisão de 45 a 70 s, e houve respostas 503 ("high demand").
+- **Limite de tempo por etapa:** cada chamada tem seu próprio `AbortController`, e o limite cobre também a leitura do corpo da resposta. A soma (210 s) fica abaixo do limite do navegador (240 s). Os valores são altos por causa das medições sob carga.
+- **Schema compatível com o Gemini:** a API só aceita `enum` em campos `STRING`. A nota de cada competência é pedida como texto (`"0"`, `"40"` … `"200"`, `format: "enum"`) e convertida para número por `normalizarAvaliacao`. Os schemas também usam `minItems`/`maxItems` (5 competências, até 5 sugestões, de 1 a 5 pontos fortes e próximos passos, até 30 correções).
+- **Normalização:** antes da validação, `normalizarAvaliacao` converte as notas e corta listas acima do limite, e `normalizarRevisao` corta `corrections` em 30 itens. Notas fora dos níveis continuam sendo rejeitadas.
 
 1. **Avaliação principal** (`systemPrompt`, entrada `{ theme, essay }`)
    - avalia somente o texto e a proposta, tratando ambos como dados não confiáveis;
@@ -392,7 +407,7 @@ Ambas as chamadas usam `system_instruction` com o prompt, o conteúdo do usuári
    - não acrescenta informação nem reescreve o texto integralmente;
    - devolve o texto completo e lista somente as alterações reais (`corrections`).
 
-`parseCandidate` concatena as partes de texto do primeiro candidato, rejeita respostas com `finishReason` `MAX_TOKENS`, `SAFETY` ou `RECITATION`, remove cercas ```` ```json ```` se existirem e faz `JSON.parse` (retorna `null` em falha).
+`parseCandidate` concatena as partes de texto do primeiro candidato, ignorando partes marcadas como `thought` (raciocínio interno), rejeita respostas com `finishReason` `MAX_TOKENS`, `SAFETY` ou `RECITATION`, remove cercas ```` ```json ```` se existirem e faz `JSON.parse` (retorna `null` em falha).
 
 A nota final é a soma das cinco competências (máximo de 1.000), calculada no frontend.
 
@@ -421,7 +436,7 @@ Ativado por `ENTRELINHAS_TEST_MODE=true` (ou `setTestConfiguration({ testMode: t
 - redação e proposta obrigatórias (texto não vazio após `trim`), com `aria-invalid` e foco no campo faltante;
 - limites de caracteres aplicados via atributo `maxlength` (1.500 e 5.000);
 - resposta validada por `isAssessmentResponse`: cinco competências, notas apenas em {0, 40, 80, 120, 160, 200}, `summary` e `correctedText` não vazios, `corrections` obrigatório com no máximo 30 itens, `strengths` e `nextSteps` com 1 a 5 itens não vazios;
-- timeout de 95 segundos.
+- timeout de 240 segundos.
 
 ### Backend
 
@@ -431,7 +446,7 @@ Ativado por `ENTRELINHAS_TEST_MODE=true` (ou `setTestConfiguration({ testMode: t
 | `Content-Type` | deve conter `application/json` (415 caso contrário) |
 | `theme` | string não vazia, até 1.500 caracteres |
 | `essay` | string não vazia, até 5.000 caracteres |
-| Timeout com o Gemini | 90 segundos para as duas chamadas somadas |
+| Timeout com o Gemini | 120 s para a avaliação e 90 s para a revisão, contados separadamente |
 | `competencies` | exatamente 5, notas permitidas 0–200 em passos de 40 |
 | `summary`, `rationale` | até 4.000 caracteres |
 | `evidence` | até 800 caracteres |
@@ -455,7 +470,12 @@ Medidas implementadas:
 - Content Security Policy nos estáticos: `default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:`;
 - prompts orientados a tratar tema e redação como dados não confiáveis e ignorar instruções contidas neles;
 - renderização via `textContent`, evitando injeção de HTML vindo da IA;
-- sem armazenamento das redações no servidor; logs de erro não registram o conteúdo enviado.
+- sem armazenamento das redações no servidor;
+- logs de diagnóstico no console do servidor, com prefixo `[Gemini]` e a etapa (`avaliacao` ou `revisao`):
+  - erro HTTP do provedor: status HTTP, status do provedor e mensagem do provedor (até 500 caracteres);
+  - resposta fora do formato: `finishReason`, `blockReason` e contagem de tokens de raciocínio e de resposta;
+  - tempo esgotado e falha de conexão;
+  - os logs nunca contêm a redação, o tema nem a chave; qualquer ocorrência da chave em mensagens do provedor é trocada por `[chave oculta]`.
 
 ## 15. Endpoints e rotas
 
@@ -489,13 +509,13 @@ Formato:
 | `INVALID_REQUEST` | 400 / 413 / 415 | JSON inválido, corpo grande demais, `Content-Type` incorreto ou erro de leitura |
 | `INVALID_INPUT` | 400 | tema/redação ausentes, de tipo errado ou acima do limite |
 | `SERVICE_NOT_CONFIGURED` | 503 | `GEMINI_API_KEY` ausente (fora do modo teste) |
-| `PROVIDER_BUSY` | 503 | Gemini retornou 429 |
-| `INVALID_API_KEY` | 502 | Gemini retornou 401/403 |
-| `INVALID_MODEL` | 502 | Gemini retornou 404 (verificar `GEMINI_MODEL`) |
+| `PROVIDER_BUSY` | 503 | Gemini retornou 429 (cota) ou 503 (sobrecarga) |
+| `INVALID_API_KEY` | 502 | Gemini retornou 401/403, ou 400 com motivo `API_KEY_INVALID` |
+| `INVALID_MODEL` | 502 | Gemini retornou 404; a mensagem cita o modelo configurado e sugere verificar `GEMINI_MODEL` no `.env` (padrão `gemini-3.8-flash`) |
 | `PROVIDER_ERROR` | 502 | outro erro HTTP do Gemini (mensagem diferente para avaliação e revisão) |
 | `INVALID_PROVIDER_RESPONSE` | 502 | avaliação fora do schema ou incompleta |
 | `INVALID_PROOFREADING_RESPONSE` | 502 | revisão fora do schema ou incompleta |
-| `PROVIDER_TIMEOUT` | 504 | limite de 90 s excedido |
+| `PROVIDER_TIMEOUT` | 504 | limite de tempo da avaliação (120 s) ou da revisão (90 s) excedido; a mensagem indica a etapa |
 | `PROVIDER_UNAVAILABLE` | 502 | falha de rede ao contatar o Gemini |
 | `METHOD_NOT_ALLOWED` | 405 | método HTTP incorreto nas rotas de API |
 | `NOT_FOUND` | 404 | rota inexistente |
@@ -513,11 +533,24 @@ Formato:
 - `POST /api/correct` com entrada vazia (400 `INVALID_INPUT`), JSON malformado (400 `INVALID_REQUEST`), `Content-Type` `text/plain` (415) e sem chave configurada (503 `SERVICE_NOT_CONFIGURED`);
 - página principal (200, `text/html`) e rota inexistente (404 `NOT_FOUND`);
 - `createTestAssessment` (880 pontos, notas fixas, texto preservado, prefixo do resumo);
-- alternância de modo via `setTestConfiguration`.
+- alternância de modo via `setTestConfiguration`;
+- schemas sem `enum` fora de campos `STRING` e conversão da nota em texto para número;
+- `parseCandidate` ignorando partes `thought`;
+- limite do navegador em `script.js` maior que a soma dos limites do servidor;
+- **Gemini simulado** (fetch falso via `setTestConfiguration`, sem rede):
+  - sucesso nas duas etapas, conferindo `thinkingConfig`, `maxOutputTokens`, a chave só no cabeçalho e a entrada `{ original, draft }` da revisão;
+  - modelo 2.5 recebendo `thinkingBudget`, e modelo fora das famílias 2.5 e 3.x sem `thinkingConfig`;
+  - erro 404 de modelo (502 `INVALID_MODEL`, mensagem citando `GEMINI_MODEL`);
+  - modelo padrão `gemini-3.8-flash`;
+  - resposta `MAX_TOKENS` (502, sem chamar a revisão, com log de diagnóstico);
+  - erro 429 (503 `PROVIDER_BUSY`);
+  - erro 401 e erro 400 `API_KEY_INVALID` (502 `INVALID_API_KEY`);
+  - tempo esgotado na avaliação e na revisão, com limites independentes (504 `PROVIDER_TIMEOUT`);
+  - os logs não contêm a redação nem a chave.
 
-Não há testes de frontend nem testes end-to-end. Os testes não chamam o Gemini real.
+Não há testes de frontend nem testes end-to-end. Os testes não chamam o Gemini real, então não garantem que a API real aceite o schema; isso só é verificado manualmente com uma chave.
 
-Observação: como `server.js` carrega o `.env` ao ser importado, o teste de `SERVICE_NOT_CONFIGURED` falha se existir um `.env` com `GEMINI_API_KEY` preenchida ou com `ENTRELINHAS_TEST_MODE=true`.
+Os testes que dependem da configuração (como `SERVICE_NOT_CONFIGURED`) a definem via `setTestConfiguration` e a restauram ao final, por isso não dependem do `.env` local.
 
 ## 18. Identidade visual
 
@@ -568,7 +601,10 @@ Itens identificados na análise, registrados apenas para referência (não alter
 - o vínculo tema → repertório depende da semelhança textual entre `titulo` e `title`;
 - o modo demonstração é detectado no frontend pelo prefixo do `summary`, não pelo campo `testMode`;
 - o teste "calcula corretamente os seis níveis possíveis da nota" não exercita código da aplicação;
-- o `README` não existe; este SPEC é a principal documentação.
+- o `README` não existe; este SPEC é a principal documentação;
+- `corrections` lista apenas as mudanças da revisão sobre o rascunho da primeira etapa, não sobre o texto original. No teste real, uma redação com vários erros de acentuação voltou com 0 correções listadas, embora o texto corrigido estivesse revisado;
+- se a revisão falhar (por exemplo, com 503), a avaliação já concluída é descartada;
+- não há nova tentativa automática quando o Gemini responde 503 ("high demand"), que foi frequente nos testes reais.
 
 ## 21. Limitações atuais
 

@@ -33,4 +33,4 @@ npm test    # executa os testes com node:test
 - Node.js 20.6 ou superior.
 - A chave `GEMINI_API_KEY` fica somente no `.env` (ignorado pelo git) e nunca deve ir para o frontend, para o código ou para a documentação.
 - `ENTRELINHAS_TEST_MODE=true` permite testar a interface sem chave (nota fixa de 880).
-- Os testes esperam que não haja `GEMINI_API_KEY` nem `ENTRELINHAS_TEST_MODE=true` no ambiente ao rodar `npm test`.
+- Os testes não usam rede: o Gemini é simulado com `setTestConfiguration({ fetch })`. Todo teste que muda a configuração deve restaurá-la no final (`apiKey: ""`, `fetch: null`, `tempoLimite: null`), para não depender do `.env` local.

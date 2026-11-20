@@ -858,7 +858,8 @@ correctTextButton.addEventListener("click", async () => {
   correctedOutput.setAttribute("aria-busy", "true");
 
   const browserController = new AbortController();
-  const browserTimeout = setTimeout(() => browserController.abort(), 95_000);
+  // Deve ser maior que a soma dos limites do servidor (120 s da avaliação + 90 s da revisão).
+  const browserTimeout = setTimeout(() => browserController.abort(), 240_000);
 
   try {
     const response = await fetch("/api/correct", {

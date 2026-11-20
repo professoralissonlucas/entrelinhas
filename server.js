@@ -27,9 +27,28 @@ loadLocalEnv();
 
 const port = Number(process.env.PORT || 3000);
 let apiKey = process.env.GEMINI_API_KEY;
-let model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const modeloPadrao = "gemini-3.8-flash";
+let model = process.env.GEMINI_MODEL || modeloPadrao;
 let testMode = String(process.env.ENTRELINHAS_TEST_MODE || "false").toLowerCase() === "true";
-const requestTimeoutMs = 45_000;
+// Implementação de fetch usada nas chamadas ao Gemini; os testes podem substituí-la para simular o provedor sem rede.
+let fetchGemini = (...argumentos) => globalThis.fetch(...argumentos);
+
+// Cada etapa tem seu próprio limite de tempo. A soma (210 s) deve ficar abaixo do limite do navegador em script.js (240 s).
+// Os valores são altos porque, com o gemini-3.8-flash sob carga, medições reais chegaram a ~100 s na avaliação
+// e ~70 s na revisão de uma redação de 4.900 caracteres. Em condições normais as etapas levam bem menos.
+const tempoLimitePadrao = Object.freeze({ avaliacao: 120_000, revisao: 90_000 });
+let tempoLimite = { ...tempoLimitePadrao };
+
+// Os modelos Gemini 2.5 e 3.x "pensam" antes de responder, e os tokens de raciocínio contam dentro de maxOutputTokens.
+// - Gemini 3.x: o raciocínio é controlado por thinkingConfig.thinkingLevel ("low", "medium" ou "high").
+//   O nível não é um teto rígido de tokens, então maxOutputTokens tem bastante folga (o limite do 3.8-flash é 65.536).
+// - Gemini 2.5: usa thinkingConfig.thinkingBudget (número de tokens). 512 é o mínimo do 2.5-flash-lite e vale para flash e pro.
+const configuracaoGeracao = Object.freeze({
+  avaliacao: { nivelRaciocinio: "low", orcamentoRaciocinio: 1_024, maxOutputTokens: 24_576 },
+  revisao: { nivelRaciocinio: "low", orcamentoRaciocinio: 512, maxOutputTokens: 16_384 },
+});
+
+const niveisCompetencia = [0, 40, 80, 120, 160, 200];
 const maxRequestBytes = 20_000;
 const maxEssayLength = 5_000;
 const maxThemeLength = 1_500;
@@ -73,26 +92,36 @@ O correctedText deve conter a redação revisada completa, com quebras de parág
 Retorne apenas o JSON no formato solicitado, em português brasileiro, sem Markdown ou texto fora do JSON.
 `.trim();
 
+// Schema no formato aceito pelo Gemini (subconjunto do OpenAPI 3.0).
+// A API só aceita "enum" em campos STRING; por isso a nota vem como texto ("0" a "200")
+// e é convertida para número em normalizarAvaliacao antes da validação.
 const responseSchema = {
   type: "OBJECT",
   properties: {
     summary: { type: "STRING" },
     competencies: {
       type: "ARRAY",
+      minItems: 5,
+      maxItems: 5,
       items: {
         type: "OBJECT",
         properties: {
-          score: { type: "INTEGER", enum: [0, 40, 80, 120, 160, 200] },
+          score: {
+            type: "STRING",
+            format: "enum",
+            enum: niveisCompetencia.map(String),
+            description: "Nota da competência: 0, 40, 80, 120, 160 ou 200.",
+          },
           rationale: { type: "STRING" },
           evidence: { type: "STRING" },
-          suggestions: { type: "ARRAY", items: { type: "STRING" } },
+          suggestions: { type: "ARRAY", maxItems: 5, items: { type: "STRING" } },
         },
         required: ["score", "rationale", "evidence", "suggestions"],
       },
     },
     correctedText: { type: "STRING" },
-    strengths: { type: "ARRAY", items: { type: "STRING" } },
-    nextSteps: { type: "ARRAY", items: { type: "STRING" } },
+    strengths: { type: "ARRAY", minItems: 1, maxItems: 5, items: { type: "STRING" } },
+    nextSteps: { type: "ARRAY", minItems: 1, maxItems: 5, items: { type: "STRING" } },
   },
   required: ["summary", "competencies", "correctedText", "strengths", "nextSteps"],
 };
@@ -103,6 +132,7 @@ const proofreadingSchema = {
     correctedText: { type: "STRING" },
     corrections: {
       type: "ARRAY",
+      maxItems: 30,
       items: {
         type: "OBJECT",
         properties: {
@@ -187,7 +217,7 @@ function isNonEmptyString(value, maxLength = 4_000) {
 }
 
 function validateAssessment(value) {
-  const allowedScores = new Set([0, 40, 80, 120, 160, 200]);
+  const allowedScores = new Set(niveisCompetencia);
   return (
     value &&
     typeof value === "object" &&
@@ -231,6 +261,120 @@ function validateProofreading(value) {
         isNonEmptyString(item.reason, 500),
     )
   );
+}
+
+function limitarLista(valor, maximo) {
+  return Array.isArray(valor) ? valor.slice(0, maximo) : valor;
+}
+
+// Converte a nota recebida como texto ("160") em número e corta listas que excedam os limites.
+// Não corrige conteúdo inválido: notas fora dos níveis continuam sendo rejeitadas por validateAssessment.
+function normalizarAvaliacao(valor) {
+  if (!valor || typeof valor !== "object" || Array.isArray(valor)) return valor;
+  return {
+    ...valor,
+    competencies: Array.isArray(valor.competencies)
+      ? valor.competencies.map((item) => {
+        if (!item || typeof item !== "object") return item;
+        const nota = typeof item.score === "string" && /^\d{1,3}$/.test(item.score.trim())
+          ? Number(item.score.trim())
+          : item.score;
+        return { ...item, score: nota, suggestions: limitarLista(item.suggestions, 5) };
+      })
+      : valor.competencies,
+    strengths: limitarLista(valor.strengths, 5),
+    nextSteps: limitarLista(valor.nextSteps, 5),
+  };
+}
+
+function normalizarRevisao(valor) {
+  if (!valor || typeof valor !== "object" || Array.isArray(valor)) return valor;
+  return { ...valor, corrections: limitarLista(valor.corrections, 30) };
+}
+
+// Escolhe o parâmetro de raciocínio conforme a família do modelo. Outros modelos não recebem thinkingConfig.
+function montarConfiguracaoRaciocinio(nomeModelo, { nivelRaciocinio, orcamentoRaciocinio }) {
+  if (/^gemini-3(\.\d+)?-/i.test(nomeModelo)) return { thinkingLevel: nivelRaciocinio };
+  if (/^gemini-2\.5-/i.test(nomeModelo)) return { thinkingBudget: orcamentoRaciocinio };
+  return undefined;
+}
+
+// Remove a chave da API de qualquer texto antes de registrá-lo no console.
+function ocultarSegredos(texto) {
+  let resultado = String(texto ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
+  if (apiKey) resultado = resultado.split(apiKey).join("[chave oculta]");
+  return resultado;
+}
+
+// Registra apenas metadados do erro do provedor: status, código e mensagem. Nunca a redação nem a chave.
+function registrarErroProvedor(etapa, status, corpo) {
+  const statusProvedor = corpo?.error?.status ? ` ${corpo.error.status}` : "";
+  const mensagem = ocultarSegredos(corpo?.error?.message || "sem mensagem do provedor");
+  console.error(`[Gemini] Etapa "${etapa}": HTTP ${status}${statusProvedor} — ${mensagem}`);
+}
+
+function registrarRespostaInvalida(etapa, corpo) {
+  const candidato = corpo?.candidates?.[0];
+  const uso = corpo?.usageMetadata || {};
+  console.error(
+    `[Gemini] Etapa "${etapa}": resposta fora do formato esperado `
+    + `(finishReason=${candidato?.finishReason ?? "ausente"}, `
+    + `blockReason=${corpo?.promptFeedback?.blockReason ?? "nenhum"}, `
+    + `tokensRaciocinio=${uso.thoughtsTokenCount ?? 0}, tokensResposta=${uso.candidatesTokenCount ?? 0}).`,
+  );
+}
+
+function chaveRecusada(status, corpo) {
+  if ([401, 403].includes(status)) return true;
+  if (status !== 400) return false;
+  const motivos = (corpo?.error?.details || []).map((detalhe) => detalhe?.reason);
+  return motivos.includes("API_KEY_INVALID") || /api key/i.test(String(corpo?.error?.message || ""));
+}
+
+function criarErroTempoEsgotado(etapa) {
+  return Object.assign(new Error(`Tempo esgotado na etapa ${etapa}.`), { codigo: "PROVIDER_TIMEOUT", etapa });
+}
+
+// Faz uma chamada ao Gemini com limite de tempo próprio, que cobre também a leitura do corpo da resposta.
+async function chamarGemini({ etapa, instrucao, entrada, schema, limiteMs }) {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const { maxOutputTokens } = configuracaoGeracao[etapa];
+  const thinkingConfig = montarConfiguracaoRaciocinio(model, configuracaoGeracao[etapa]);
+  const controlador = new AbortController();
+  const temporizador = setTimeout(() => controlador.abort(), limiteMs);
+
+  try {
+    const upstream = await fetchGemini(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      signal: controlador.signal,
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: instrucao }] },
+        contents: [{
+          role: "user",
+          parts: [{ text: JSON.stringify(entrada) }],
+        }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: schema,
+          maxOutputTokens,
+          temperature: 0.2,
+          ...(thinkingConfig ? { thinkingConfig } : {}),
+        },
+      }),
+    });
+    const corpo = await upstream.json().catch(() => null);
+    if (controlador.signal.aborted) throw criarErroTempoEsgotado(etapa);
+    return { upstream, body: corpo };
+  } catch (error) {
+    if (controlador.signal.aborted) throw criarErroTempoEsgotado(etapa);
+    throw error;
+  } finally {
+    clearTimeout(temporizador);
+  }
 }
 
 function createTestAssessment(body) {
@@ -279,89 +423,71 @@ async function assessEssay(request, response) {
     return;
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs * 2);
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const enviarErroProvedor = (etapa, upstream, corpo, mensagemPadrao) => {
+    registrarErroProvedor(etapa, upstream.status, corpo);
+    if (upstream.status === 429) {
+      sendJson(response, 503, {
+        error: { code: "PROVIDER_BUSY", message: "O serviço de IA está temporariamente ocupado. Aguarde um pouco e tente novamente." },
+      });
+    } else if (chaveRecusada(upstream.status, corpo)) {
+      sendJson(response, 502, {
+        error: { code: "INVALID_API_KEY", message: "A chave da API de IA não foi aceita. Solicite ao responsável que confira a configuração." },
+      });
+    } else if (upstream.status === 404) {
+      sendJson(response, 502, {
+        error: {
+          code: "INVALID_MODEL",
+          message: `O modelo de IA configurado (${model}) não está disponível. Verifique a variável GEMINI_MODEL no arquivo .env (padrão: ${modeloPadrao}).`,
+        },
+      });
+    } else if (upstream.status === 503) {
+      sendJson(response, 503, {
+        error: { code: "PROVIDER_BUSY", message: "O serviço de IA está sobrecarregado no momento. Aguarde um pouco e tente novamente." },
+      });
+    } else {
+      sendJson(response, 502, {
+        error: { code: "PROVIDER_ERROR", message: mensagemPadrao },
+      });
+    }
+  };
 
   try {
-    const requestGemini = async (instruction, input, schema, maxOutputTokens) => {
-      const upstream = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: instruction }] },
-          contents: [{
-            role: "user",
-            parts: [{ text: JSON.stringify(input) }],
-          }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: schema,
-            maxOutputTokens,
-            temperature: 0.2,
-          },
-        }),
-      });
-      return { upstream, body: await upstream.json().catch(() => null) };
-    };
-
-    const sendProviderError = (upstream, incompleteMessage) => {
-      if (upstream.status === 429) {
-        sendJson(response, 503, {
-          error: { code: "PROVIDER_BUSY", message: "O serviço de IA está temporariamente ocupado. Aguarde um pouco e tente novamente." },
-        });
-      } else if ([401, 403].includes(upstream.status)) {
-        sendJson(response, 502, {
-          error: { code: "INVALID_API_KEY", message: "A chave da API de IA não foi aceita. Solicite ao responsável que confira a configuração." },
-        });
-      } else if (upstream.status === 404) {
-        sendJson(response, 502, {
-          error: { code: "INVALID_MODEL", message: "O modelo configurado não está disponível. Solicite ao responsável que confira GEMINI_MODEL." },
-        });
-      } else {
-        console.error("Gemini request failed with status", upstream.status);
-        sendJson(response, 502, {
-          error: { code: "PROVIDER_ERROR", message: incompleteMessage },
-        });
-      }
-    };
-
-    const assessmentResponse = await requestGemini(
-      systemPrompt,
-      { theme: body.theme, essay: body.essay },
-      responseSchema,
-      6_000,
-    );
-    if (!assessmentResponse.upstream.ok) {
-      sendProviderError(assessmentResponse.upstream, "O serviço de IA não conseguiu avaliar o texto. Tente novamente.");
+    const respostaAvaliacao = await chamarGemini({
+      etapa: "avaliacao",
+      instrucao: systemPrompt,
+      entrada: { theme: body.theme, essay: body.essay },
+      schema: responseSchema,
+      limiteMs: tempoLimite.avaliacao,
+    });
+    if (!respostaAvaliacao.upstream.ok) {
+      enviarErroProvedor("avaliacao", respostaAvaliacao.upstream, respostaAvaliacao.body, "O serviço de IA não conseguiu avaliar o texto. Tente novamente.");
       return;
     }
 
-    const assessment = parseCandidate(assessmentResponse);
+    const assessment = normalizarAvaliacao(parseCandidate(respostaAvaliacao));
     if (!validateAssessment(assessment)) {
+      registrarRespostaInvalida("avaliacao", respostaAvaliacao.body);
       sendJson(response, 502, {
         error: { code: "INVALID_PROVIDER_RESPONSE", message: "A avaliação veio incompleta ou fora do formato esperado. Tente novamente." },
       });
       return;
     }
 
-    const proofreadingResponse = await requestGemini(
-      proofreadingPrompt,
-      { original: body.essay, draft: assessment.correctedText },
-      proofreadingSchema,
-      6_000,
-    );
-    if (!proofreadingResponse.upstream.ok) {
-      sendProviderError(proofreadingResponse.upstream, "A avaliação foi gerada, mas a revisão ortográfica falhou. Tente novamente.");
+    const respostaRevisao = await chamarGemini({
+      etapa: "revisao",
+      instrucao: proofreadingPrompt,
+      entrada: { original: body.essay, draft: assessment.correctedText },
+      schema: proofreadingSchema,
+      limiteMs: tempoLimite.revisao,
+    });
+    if (!respostaRevisao.upstream.ok) {
+      enviarErroProvedor("revisao", respostaRevisao.upstream, respostaRevisao.body, "A avaliação foi gerada, mas a revisão ortográfica falhou. Tente novamente.");
       return;
     }
 
-    const proofreading = parseCandidate(proofreadingResponse);
+    const proofreading = normalizarRevisao(parseCandidate(respostaRevisao));
     if (!validateProofreading(proofreading)) {
+      registrarRespostaInvalida("revisao", respostaRevisao.body);
       sendJson(response, 502, {
         error: { code: "INVALID_PROOFREADING_RESPONSE", message: "A revisão ortográfica veio incompleta. Tente novamente." },
       });
@@ -372,18 +498,22 @@ async function assessEssay(request, response) {
     assessment.corrections = proofreading.corrections;
     sendJson(response, 200, { result: assessment });
   } catch (error) {
-    if (controller.signal.aborted) {
+    if (error?.codigo === "PROVIDER_TIMEOUT") {
+      console.error(`[Gemini] Etapa "${error.etapa}": tempo limite de ${tempoLimite[error.etapa]} ms excedido.`);
       sendJson(response, 504, {
-        error: { code: "PROVIDER_TIMEOUT", message: "A avaliação demorou mais que o esperado. Tente novamente." },
+        error: {
+          code: "PROVIDER_TIMEOUT",
+          message: error.etapa === "revisao"
+            ? "A revisão ortográfica demorou mais que o esperado. Tente novamente."
+            : "A avaliação demorou mais que o esperado. Tente novamente.",
+        },
       });
     } else {
-      console.error("Could not reach Gemini", error);
+      console.error(`[Gemini] Falha de conexão com o provedor: ${error?.name ?? "Erro"} — ${ocultarSegredos(error?.cause?.code || error?.message)}`);
       sendJson(response, 502, {
         error: { code: "PROVIDER_UNAVAILABLE", message: "Não foi possível conectar ao serviço de IA. Tente novamente." },
       });
     }
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -441,8 +571,10 @@ const server = http.createServer(async (request, response) => {
 
 function parseCandidate(result) {
   const candidate = result?.body?.candidates?.[0];
+  // Partes marcadas como "thought" são raciocínio interno do modelo e não fazem parte do JSON.
   const text = candidate?.content?.parts
-    ?.map((part) => part.text)
+    ?.filter((part) => part && !part.thought)
+    .map((part) => part.text)
     .filter((part) => typeof part === "string")
     .join("");
   if (!text || ["MAX_TOKENS", "SAFETY", "RECITATION"].includes(candidate.finishReason)) return null;
@@ -468,10 +600,23 @@ module.exports = {
   validateAssessment,
   validateProofreading,
   parseCandidate,
+  normalizarAvaliacao,
+  normalizarRevisao,
+  responseSchema,
+  proofreadingSchema,
+  tempoLimitePadrao,
+  modeloPadrao,
+  // Permite aos testes trocar a configuração em tempo de execução.
+  // fetch: função que substitui o fetch do Gemini (null restaura o fetch real).
+  // tempoLimite: { avaliacao, revisao } em milissegundos (null restaura os padrões).
   setTestConfiguration(config = {}) {
     if (typeof config.apiKey === "string") apiKey = config.apiKey;
     if (typeof config.model === "string") model = config.model;
     if (typeof config.testMode === "boolean") testMode = config.testMode;
+    if (typeof config.fetch === "function") fetchGemini = config.fetch;
+    if (config.fetch === null) fetchGemini = (...argumentos) => globalThis.fetch(...argumentos);
+    if (config.tempoLimite && typeof config.tempoLimite === "object") tempoLimite = { ...tempoLimite, ...config.tempoLimite };
+    if (config.tempoLimite === null) tempoLimite = { ...tempoLimitePadrao };
   },
   createTestAssessment,
 };

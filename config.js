@@ -8,5 +8,5 @@
 //
 // Este arquivo é público: NUNCA coloque a chave do Gemini aqui.
 window.ENTRELINHAS_CONFIG = {
-  apiBaseUrl: "",
+  apiBaseUrl: "https://entrelinhas-api.professoralisson.workers.dev",
 };

@@ -2,7 +2,7 @@
 
 > Documento de contexto do projeto. Descreve o estado atual do código (`index.html`, `styles.css`, `config.js`, `script.js`, `server.js`, `lib/`, `worker/`, `.github/workflows/` e `test/`) e deve ser mantido em sincronia com ele. Última revisão geral: 19/11/2026.
 >
-> **Em produção:** o site estático fica no GitHub Pages (`https://professoralissonlucas.github.io/entrelinhas/`), publicado por GitHub Actions. A correção com IA roda num Cloudflare Worker, com o modelo `gemini-3.8-flash`. **Localmente,** `npm start` serve o site e a API juntos.
+> **Em produção:** o site estático fica no GitHub Pages (`https://professoralissonlucas.github.io/entrelinhas/`), publicado por GitHub Actions. A correção com IA roda num Cloudflare Worker, com o modelo `gemini-3.5-flash`. **Localmente,** `npm start` serve o site e a API juntos.
 
 ## 1. Visão geral
 
@@ -52,7 +52,7 @@ Ajudar estudantes a organizar ideias, encontrar repertórios e compreender a qua
 - **Backend na internet:** Cloudflare Worker (`worker/`), publicado com `npx wrangler deploy`;
 - **Núcleo compartilhado:** `lib/nucleo-correcao.js` (CommonJS, sem APIs exclusivas do Node), usado pelo `server.js` e pelo Worker;
 - **API de IA:** Google Gemini (`generativelanguage.googleapis.com/v1beta`, método `generateContent`), chamada via `fetch` nativo;
-- **Modelo padrão:** `gemini-3.8-flash` (configurável). O `gemini-2.5-flash` não está mais disponível para chaves novas (o Google responde 404);
+- **Modelo padrão:** `gemini-3.5-flash` (configurável). Até 20/11/2026 o padrão era o `gemini-3.8-flash`, trocado porque o Google passou a responder 503 `UNAVAILABLE` ("high demand") ou demorar mais de 115 s nele, enquanto o 3.5 respondia em segundos. O `gemini-2.5-flash` não está mais disponível para chaves novas (o Google responde 404);
 - **Testes:** executor nativo `node:test` com `node:assert/strict`;
 - **Hospedagem:**
   - site estático no GitHub Pages, publicado pelo GitHub Actions (`.github/workflows/pages.yml`);
@@ -104,7 +104,7 @@ Copie `.env.example` para `.env` na raiz do projeto:
 
 ```env
 GEMINI_API_KEY=cole_sua_chave_aqui
-GEMINI_MODEL=gemini-3.8-flash
+GEMINI_MODEL=gemini-3.5-flash
 PORT=3000
 ENTRELINHAS_TEST_MODE=false
 ```
@@ -112,7 +112,7 @@ ENTRELINHAS_TEST_MODE=false
 | Variável | Obrigatória | Padrão | Função |
 |---|---|---|---|
 | `GEMINI_API_KEY` | Sim, para correção real | — | Chave enviada ao Gemini no cabeçalho `x-goog-api-key`. |
-| `GEMINI_MODEL` | Não | `gemini-3.8-flash` | Modelo usado nas duas chamadas. |
+| `GEMINI_MODEL` | Não | `gemini-3.5-flash` | Modelo usado nas duas chamadas. |
 | `PORT` | Não | `3000` | Porta do servidor HTTP. |
 | `ENTRELINHAS_TEST_MODE` | Não | `false` | Quando `true`, retorna uma avaliação fixa de demonstração sem chamar o Gemini. |
 
@@ -450,7 +450,7 @@ Ambas as chamadas passam pela função `chamarGemini` e usam `system_instruction
 | Navegador (`script.js`) | — | — | — | 135 s |
 
 - **Raciocínio (thinking):** nos modelos Gemini 2.5 e 3.x, os tokens de raciocínio contam dentro de `maxOutputTokens`. O parâmetro é escolhido por `montarConfiguracaoRaciocinio` conforme o nome do modelo:
-  - `gemini-3*` (incluindo o padrão `gemini-3.8-flash`): `thinkingConfig.thinkingLevel`. Os valores aceitos são `low`, `medium` e `high`; `minimal` não é aceito no 3.8. `"low"` é o menor nível disponível e, nas medições, já resultou em **0 tokens de raciocínio** nas duas etapas;
+  - `gemini-3*` (incluindo o padrão `gemini-3.5-flash`): `thinkingConfig.thinkingLevel`. Os valores aceitos são `low`, `medium` e `high`; `minimal` não é aceito no 3.8. `"low"` é o menor nível disponível e, nas medições, já resultou em **0 tokens de raciocínio** nas duas etapas;
   - `gemini-2.5*`: `thinkingConfig.thinkingBudget` em tokens (512 é o mínimo do `2.5-flash-lite` e vale para flash e pro);
   - outros nomes (por exemplo, `gemini-flash-latest`): nenhum `thinkingConfig`.
 - **Etapas em paralelo:** a revisão parte só do texto original (`{ original }`) e não depende da avaliação. Por isso as duas chamadas começam juntas e o tempo total é o da etapa mais lenta, não a soma.
@@ -615,7 +615,7 @@ Formato:
 | `PROVIDER_BUSY` | 503 | Gemini retornou 429 por minuto ou 503 (sobrecarga) na avaliação |
 | `PROVIDER_QUOTA_EXCEEDED` | 503 | Gemini retornou 429 de cota diária (`quotaId` com `PerDay`, por exemplo 20 requisições/dia no plano gratuito) |
 | `INVALID_API_KEY` | 502 | Gemini retornou 401/403, ou 400 com motivo `API_KEY_INVALID` |
-| `INVALID_MODEL` | 502 | Gemini retornou 404; a mensagem cita o modelo configurado e sugere verificar `GEMINI_MODEL` no `.env` (servidor local) ou no `wrangler.toml` (Worker), com padrão `gemini-3.8-flash` |
+| `INVALID_MODEL` | 502 | Gemini retornou 404; a mensagem cita o modelo configurado e sugere verificar `GEMINI_MODEL` no `.env` (servidor local) ou no `wrangler.toml` (Worker), com padrão `gemini-3.5-flash` |
 | `PROVIDER_ERROR` | 502 | outro erro HTTP do Gemini (mensagem diferente para avaliação e revisão) |
 | `INVALID_PROVIDER_RESPONSE` | 502 | avaliação fora do schema ou incompleta |
 | (sem código de erro) | 200 | a revisão falhou, mas a avaliação deu certo: resposta parcial com `proofreadingUnavailable: true` (ver seção 9) |
@@ -651,7 +651,7 @@ Formato:
   - avaliação e revisão começando juntas, com tempo total próximo ao da etapa mais lenta;
   - modelo 2.5 recebendo `thinkingBudget`, e modelo fora das famílias 2.5 e 3.x sem `thinkingConfig`;
   - erro 404 de modelo (502 `INVALID_MODEL`, mensagem citando `GEMINI_MODEL`);
-  - modelo padrão `gemini-3.8-flash`;
+  - modelo padrão `gemini-3.5-flash`;
   - resposta `MAX_TOKENS` na avaliação (502, com log de diagnóstico);
   - erro 429 na avaliação (503 `PROVIDER_BUSY`) e 429 por minuto que continua `PROVIDER_BUSY`;
   - cota diária esgotada na avaliação (503 `PROVIDER_QUOTA_EXCEEDED`);
@@ -741,7 +741,7 @@ Todos os problemas apontados na análise inicial do código foram corrigidos, se
 
 | Ponto | Impacto | Sugestão |
 |---|---|---|
-| **Cota do plano gratuito do Gemini:** 20 requisições por dia por modelo no `gemini-3.8-flash`; cada avaliação usa 2, o que dá cerca de 10 redações por dia para todos os usuários. O `gemini-3.7-flash` é encaminhado para o 3.8 e divide a mesma cota. Há também limite por minuto. | Alto, para uso em sala | Ativar o faturamento no AI Studio (nível 1) |
+| **Cota do plano gratuito do Gemini:** 20 requisições por dia por modelo (cada modelo tem a sua; o padrão é o `gemini-3.5-flash`); cada avaliação usa 2, o que dá cerca de 10 redações por dia para todos os usuários. O `gemini-3.7-flash` é encaminhado para o 3.8 e divide a mesma cota. Há também limite por minuto. | Alto, para uso em sala | Ativar o faturamento no AI Studio (nível 1) |
 | **Latência do plano gratuito:** a fila no Google variou de 35 s a 112 s, mesmo para 1 token de saída. | Médio: a aluna pode esperar até 2 minutos, como avisa o status | O plano pago costuma reduzir a fila |
 | **A avaliação não tem nova tentativa:** só a revisão é repetida em 429/503. Um 503 na avaliação gera erro. | Médio | Repetir 1 vez também a avaliação, respeitando o prazo total |
 | **Limite por IP aproximado sem o KV:** sem o KV `LIMITE_USO`, cada instância do Worker conta separadamente. | Baixo a médio | Seguir o passo opcional do `worker/README.md` |
@@ -769,7 +769,7 @@ Consulta à documentação oficial de limites ([developers.cloudflare.com/worker
 | Item | Comportamento |
 |---|---|
 | Rotas | `POST /api/correct` e `GET /api/health`, com o mesmo comportamento do `server.js` (405 com `Allow`, 404 `NOT_FOUND`); um teste compara as respostas dos dois para 8 cenários do Gemini. |
-| Configuração | O secret `GEMINI_API_KEY` vem de `npx wrangler secret put GEMINI_API_KEY`. `GEMINI_MODEL = "gemini-3.8-flash"` e `ENTRELINHAS_TEST_MODE = "false"` ficam em `[vars]` do `wrangler.toml`. A mensagem de modelo indisponível aponta para o `wrangler.toml`. |
+| Configuração | O secret `GEMINI_API_KEY` vem de `npx wrangler secret put GEMINI_API_KEY`. `GEMINI_MODEL = "gemini-3.5-flash"` e `ENTRELINHAS_TEST_MODE = "false"` ficam em `[vars]` do `wrangler.toml`. A mensagem de modelo indisponível aponta para o `wrangler.toml`. |
 | CORS | `origensPermitidas` aceita somente `https://professoralissonlucas.github.io` e `http://localhost:3000`. O cabeçalho `Access-Control-Allow-Origin` devolve a origem exata, com `Vary: Origin` e `Access-Control-Expose-Headers: Retry-After`. Todas as respostas, inclusive os erros e o 429, levam CORS, para o navegador conseguir ler a mensagem. |
 | Preflight | Em `OPTIONS` com origem permitida: 204, `Access-Control-Allow-Methods: GET, POST, OPTIONS`, `Access-Control-Allow-Headers: Content-Type` e `Access-Control-Max-Age: 86400`. Com origem não permitida: 403 `CORS_NOT_ALLOWED`. |
 | Outras origens | Um `POST` vindo do navegador de outro site recebe 403 antes de qualquer chamada ao Gemini. Pedidos sem `Origin` (curl, monitoramento) são aceitos e continuam sujeitos ao limite por IP. |
@@ -875,7 +875,7 @@ Uma implementação do projeto deve:
 11. retornar mensagens de erro compreensíveis com os códigos documentados;
 12. passar em `npm test`;
 13. manter a navegação e os estados visuais acessíveis;
-14. usar o modelo `gemini-3.8-flash` por padrão, sem corte da resposta por `MAX_TOKENS`;
+14. usar o modelo `gemini-3.5-flash` por padrão, sem corte da resposta por `MAX_TOKENS`;
 15. ter o mesmo comportamento da API no servidor local e no Worker, com a lógica num único módulo;
 16. no Worker, aceitar só as origens permitidas (CORS e preflight) e limitar o uso por IP;
 17. publicar no GitHub Pages, após os testes, somente os arquivos do site;

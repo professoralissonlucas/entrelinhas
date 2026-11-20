@@ -7,7 +7,7 @@
 //
 // Configuração (ver worker/README.md):
 // - secret GEMINI_API_KEY           → `npx wrangler secret put GEMINI_API_KEY` (nunca no código);
-// - variável GEMINI_MODEL            → wrangler.toml (padrão gemini-3.8-flash);
+// - variável GEMINI_MODEL            → wrangler.toml (padrão gemini-3.5-flash);
 // - variável ENTRELINHAS_TEST_MODE   → wrangler.toml ("false" em produção);
 // - KV LIMITE_USO (opcional)         → guarda o limite de uso por IP de forma compartilhada entre servidores.
 

@@ -405,7 +405,7 @@ test("Gemini simulado: avaliação e revisão concluídas com sucesso", async ()
     assert.equal(daEtapa("revisao").length, 1);
     assert.equal(avaliacao.opcoes.headers["x-goog-api-key"], chaveDeTeste);
     assert.equal(avaliacao.url.includes(chaveDeTeste), false, "a chave não deve ir na URL");
-    assert.equal(avaliacao.url.includes("/models/gemini-3.8-flash:generateContent"), true);
+    assert.equal(avaliacao.url.includes("/models/gemini-3.5-flash:generateContent"), true);
     assert.deepEqual(avaliacao.corpo.generationConfig.thinkingConfig, { thinkingLevel: "low" });
     assert.ok(avaliacao.corpo.generationConfig.maxOutputTokens >= 16_384, "folga para raciocínio + JSON completo");
     assert.deepEqual(revisao.corpo.generationConfig.thinkingConfig, { thinkingLevel: "low" });
@@ -429,8 +429,8 @@ test("Gemini simulado: avaliação e revisão rodam em paralelo (tempo total ≈
   });
 });
 
-test("modelo padrão é o gemini-3.8-flash", () => {
-  assert.equal(require("../server.js").modeloPadrao, "gemini-3.8-flash");
+test("modelo padrão é o gemini-3.5-flash", () => {
+  assert.equal(require("../server.js").modeloPadrao, "gemini-3.5-flash");
 });
 
 test("Gemini simulado: modelos 2.5 recebem thinkingBudget em vez de thinkingLevel", async () => {
@@ -448,7 +448,7 @@ test("Gemini simulado: erro 404 de modelo sugere verificar GEMINI_MODEL", async 
     assert.equal(resposta.body.error.code, "INVALID_MODEL");
     assert.match(resposta.body.error.message, /GEMINI_MODEL/);
     assert.match(resposta.body.error.message, /gemini-2\.5-flash/);
-    assert.match(resposta.body.error.message, /gemini-3\.8-flash/);
+    assert.match(resposta.body.error.message, /gemini-3.5-flash/);
     assert.ok(registros.some((linha) => linha.includes("HTTP 404") && linha.includes("no longer available")));
   }, { model: "gemini-2.5-flash" });
 });

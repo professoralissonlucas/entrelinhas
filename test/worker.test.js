@@ -83,7 +83,7 @@ function pedidoDeCorrecao({ corpo = { theme: tema, essay: redacao }, origem = or
   });
 }
 
-const envPadrao = Object.freeze({ GEMINI_API_KEY: chaveDeTeste, GEMINI_MODEL: "gemini-3.8-flash", ENTRELINHAS_TEST_MODE: "false" });
+const envPadrao = Object.freeze({ GEMINI_API_KEY: chaveDeTeste, GEMINI_MODEL: "gemini-3.5-flash", ENTRELINHAS_TEST_MODE: "false" });
 
 async function silenciarConsole(executar) {
   const registros = [];
@@ -118,10 +118,10 @@ function pedirAoServidor(corpo) {
 // Arquivos e compatibilidade com o ambiente dos Workers
 // ---------------------------------------------------------------------------
 
-test("wrangler.toml: modelo gemini-3.8-flash, modo teste desligado e nenhuma chave no arquivo", () => {
+test("wrangler.toml: modelo gemini-3.5-flash, modo teste desligado e nenhuma chave no arquivo", () => {
   const toml = fs.readFileSync(path.join(raiz, "worker", "wrangler.toml"), "utf8");
   assert.match(toml, /^main = "src\/index\.mjs"$/m);
-  assert.match(toml, /^\[vars\]\s*\nGEMINI_MODEL = "gemini-3\.8-flash"\s*\nENTRELINHAS_TEST_MODE = "false"$/m);
+  assert.match(toml, /^\[vars\]\s*\nGEMINI_MODEL = "gemini-3.5-flash"\s*\nENTRELINHAS_TEST_MODE = "false"$/m);
   assert.doesNotMatch(toml, /^\s*GEMINI_API_KEY\s*=/m, "a chave deve ser um secret, nunca uma variável no wrangler.toml");
   assert.doesNotMatch(toml, /AIza|AQ\.[A-Za-z0-9_-]{20,}/, "nenhuma chave real no arquivo");
   assert.ok(fs.existsSync(path.join(raiz, "worker", "src", "index.mjs")));
@@ -255,7 +255,7 @@ test("modo demonstração (ENTRELINHAS_TEST_MODE=true) devolve 880 pontos sem ch
 
 test("sem o secret GEMINI_API_KEY responde SERVICE_NOT_CONFIGURED", async () => {
   const worker = moduloWorker.criarWorker();
-  const resposta = await worker.fetch(pedidoDeCorrecao(), { GEMINI_MODEL: "gemini-3.8-flash", ENTRELINHAS_TEST_MODE: "false" });
+  const resposta = await worker.fetch(pedidoDeCorrecao(), { GEMINI_MODEL: "gemini-3.5-flash", ENTRELINHAS_TEST_MODE: "false" });
   assert.equal(resposta.status, 503);
   assert.equal((await resposta.json()).error.code, "SERVICE_NOT_CONFIGURED");
 });
@@ -278,7 +278,7 @@ test("correção completa: usa o secret, o modelo do wrangler.toml e devolve a r
   assert.equal(chamadas.length, 2);
   for (const chamada of chamadas) {
     assert.equal(chamada.opcoes.headers["x-goog-api-key"], chaveDeTeste);
-    assert.match(chamada.url, /\/models\/gemini-3\.8-flash:generateContent$/);
+    assert.match(chamada.url, /\/models\/gemini-3.5-flash:generateContent$/);
     assert.deepEqual(chamada.corpo.generationConfig.thinkingConfig, { thinkingLevel: "low" });
   }
   assert.deepEqual(registros, []);
@@ -321,7 +321,7 @@ test("mesmo comportamento do server.js para os mesmos cenários do Gemini", asyn
   const tempoLimite = { esperaNovaTentativa: 1, minimoNovaTentativa: 0 };
   for (const [nome, montar] of Object.entries(cenarios)) {
     const noServidor = criarGeminiSimulado(montar());
-    app.setTestConfiguration({ apiKey: chaveDeTeste, model: "gemini-3.8-flash", testMode: false, fetch: noServidor.fetchSimulado, tempoLimite });
+    app.setTestConfiguration({ apiKey: chaveDeTeste, model: "gemini-3.5-flash", testMode: false, fetch: noServidor.fetchSimulado, tempoLimite });
     const { resultado: doServidor } = await silenciarConsole(() => pedirAoServidor({ theme: tema, essay: redacao }));
     app.setTestConfiguration({ apiKey: "", fetch: null, tempoLimite: null });
 

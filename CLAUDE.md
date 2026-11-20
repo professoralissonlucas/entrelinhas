@@ -31,6 +31,7 @@ npm test    # executa os testes com node:test
 ## Observações
 
 - Node.js 20.6 ou superior.
-- A chave `GEMINI_API_KEY` fica somente no `.env` (ignorado pelo git) e nunca deve ir para o frontend, para o código ou para a documentação.
+- A chave `GEMINI_API_KEY` fica somente no `.env` (ignorado pelo git) e nunca deve ir para o frontend, para o código ou para a documentação. O `config.js` é público (GitHub Pages): só pode conter `apiBaseUrl`.
+- O frontend também é publicado no GitHub Pages, em `/entrelinhas/`: use sempre caminhos relativos (nada começando com `/`). A CSP existe em dois lugares, no cabeçalho do `server.js` (`politicaDeSeguranca`) e na `<meta>` do `index.html`, e precisa ser igual nos dois.
 - `ENTRELINHAS_TEST_MODE=true` permite testar a interface sem chave (nota fixa de 880).
 - Os testes não usam rede: o Gemini é simulado com `setTestConfiguration({ fetch })`. Todo teste que muda a configuração deve restaurá-la no final (`apiKey: ""`, `fetch: null`, `tempoLimite: null`), para não depender do `.env` local.

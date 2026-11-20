@@ -60,12 +60,14 @@ O projeto **não possui dependências npm** (nem `dependencies` nem `devDependen
 affonso/
 ├── index.html              # estrutura da página e semântica dos componentes
 ├── styles.css              # identidade visual, layout responsivo e estados (~1.470 linhas)
-├── script.js               # dados da biblioteca, renderização, busca, modal e integração com a API (~930 linhas)
+├── config.js               # configuração pública do frontend (apiBaseUrl), carregada antes do script.js
+├── script.js               # dados da biblioteca, renderização, busca, modal e integração com a API (~990 linhas)
 ├── server.js               # servidor HTTP, estáticos, validações, prompts e integração com Gemini (~480 linhas)
 ├── test/
-│   └── entrelinhas.test.js # testes automatizados do backend (60 casos)
+│   └── entrelinhas.test.js # testes automatizados do backend (68 casos)
 ├── package.json            # metadados, engine e scripts start/test
 ├── .env.example            # modelo de variáveis de ambiente
+├── .nojekyll               # arquivo vazio: o GitHub Pages publica os arquivos sem processar com Jekyll
 ├── .gitignore              # ignora .env e node_modules/
 └── SPEC.MD                 # este documento
 ```
@@ -125,7 +127,7 @@ server.js (node:http) ──► Gemini: 1) avaliação  2) revisão ortográfica
 
 ### Frontend
 
-Página única com conteúdo renderizado por JavaScript a partir de dados embutidos em `script.js`. A única dependência externa são as fontes do Google Fonts.
+Página única com conteúdo renderizado por JavaScript a partir de dados embutidos em `script.js`. A única dependência externa são as fontes do Google Fonts. O `config.js` (carregado antes, também com `defer`) define `window.ENTRELINHAS_CONFIG.apiBaseUrl`, e `montarUrlDaApi` monta a URL da API a partir dele (ver seção 20.2). Todos os arquivos locais usam caminhos relativos, para funcionar tanto em `http://localhost:3000/` quanto em `https://professoralissonlucas.github.io/entrelinhas/`.
 
 Principais áreas da interface:
 
@@ -212,7 +214,8 @@ Mensagens finais de status:
 - sucesso sem a revisão detalhada (`proofreadingUnavailable: true`): "Avaliação concluída, mas a revisão ortográfica detalhada não pôde ser concluída desta vez; o texto revisado exibido é preliminar. A nota é uma estimativa de estudo, não uma correção oficial do Enem.";
 - modo demonstração: informa que os 880 pontos são fixos e não representam avaliação real;
 - erro do servidor: exibe `error.message` retornado pela API;
-- timeout do navegador (`AbortError`) e falha de rede (`TypeError`) têm mensagens próprias.
+- timeout do navegador (`AbortError`) tem mensagem própria;
+- API indisponível: "O serviço de correção está indisponível no momento. A biblioteca de temas, gêneros e repertórios continua funcionando; tente avaliar a redação mais tarde." Vale para falha de rede, DNS, CORS ou CSP, para resposta de erro sem o JSON da API (ex.: 404/405 do GitHub Pages), para resposta sem JSON e para `apiBaseUrl` inválido. O detalhe técnico (URL e status) vai só para o console.
 
 ### 7.4 Biblioteca
 
@@ -526,7 +529,7 @@ Medidas implementadas:
 - validação rigorosa da entrada e das respostas da IA;
 - `X-Content-Type-Options: nosniff` em todas as respostas;
 - `Cache-Control: no-store` nas respostas JSON e `no-cache` nos estáticos;
-- Content Security Policy nos estáticos: `default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:`;
+- Content Security Policy idêntica no cabeçalho do servidor local e na `<meta http-equiv>` do `index.html` (necessária no GitHub Pages, que não envia cabeçalhos personalizados): `default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.workers.dev; object-src 'none'; base-uri 'self'; form-action 'self'`. Um teste garante que as duas são iguais. Na `<meta>`, a diretiva `frame-ancestors` não tem efeito, por regra do navegador;
 - prompts orientados a tratar tema e redação como dados não confiáveis e ignorar instruções contidas neles;
 - renderização via `textContent`, evitando injeção de HTML vindo da IA;
 - sem armazenamento das redações no servidor;
@@ -542,6 +545,7 @@ Medidas implementadas:
 |---|---|---|
 | `GET` | `/`, `/index.html` | página principal |
 | `GET` | `/styles.css` | folha de estilos |
+| `GET` | `/config.js` | configuração pública do frontend (`apiBaseUrl`) |
 | `GET` | `/script.js` | JavaScript do cliente |
 | `POST` | `/api/correct` | avaliação da redação |
 | `GET` | `/api/health` | `{ "status": "ok" }` |
@@ -704,6 +708,34 @@ Consulta à documentação oficial de limites ([developers.cloudflare.com/worker
 - `AbortController`, `setTimeout`, `fetch` e `Response` existem nos Workers, então `chamarGemini`, `executarRevisao` e o cancelamento funcionam sem mudança.
 - A migração precisará trocar `node:http` e `node:fs` pelo formato de Worker (`export default { fetch }`), ler a chave de um *secret* (`env.GEMINI_API_KEY`) e servir os estáticos pelo Workers Assets ou pelo Pages.
 - Ponto a validar na migração: o comportamento quando a aluna fecha a página no meio da avaliação. A documentação consultada não detalha isso; o recomendado é testar no deploy.
+- Com o frontend no GitHub Pages e a API no Worker, as origens são diferentes. O Worker precisará responder com CORS (`Access-Control-Allow-Origin: https://professoralissonlucas.github.io` e resposta à pré-verificação `OPTIONS`), porque o `POST` com `Content-Type: application/json` dispara essa pré-verificação.
+
+## 20.2 Publicação do frontend no GitHub Pages
+
+Endereço: `https://professoralissonlucas.github.io/entrelinhas/` (subpasta `/entrelinhas/`).
+
+| Peça | Como funciona |
+|---|---|
+| `config.js` | `window.ENTRELINHAS_CONFIG = { apiBaseUrl: "" }`. Vazio = mesma origem (modo local com `npm start`); preenchido = URL do Worker, por exemplo `"https://entrelinhas-api.SEU-USUARIO.workers.dev"`. É público: nunca deve conter a chave. |
+| `montarUrlDaApi(caminho, config)` | Com `apiBaseUrl` vazio, devolve o caminho relativo `api/correct`, que a página resolve (`/api/correct` localmente, `/entrelinhas/api/correct` no Pages). Com `apiBaseUrl` preenchido, junta a base e o caminho (aceita barra final e subcaminho). Rejeita endereços que não começam com `http(s)://`. |
+| Caminhos relativos | `styles.css`, `config.js`, `script.js` e `api/correct` não começam com `/`. Um teste garante isso para todo `src`/`href`/`action` do `index.html` e para o `fetch`. |
+| CSP | Vai na `<meta http-equiv>`, porque o Pages não envia cabeçalhos personalizados. `connect-src 'self' https://*.workers.dev` permite chamar o Worker e bloqueia qualquer outro domínio. |
+| API indisponível | Mensagem clara no status existente, sem elementos visuais novos (ver seção 7.3). |
+| `.nojekyll` | Arquivo vazio na raiz: o Pages publica os arquivos como estão, sem passar pelo Jekyll. |
+| Modo local | `server.js` serve `config.js` na lista branca de estáticos; `npm start` continua funcionando. |
+
+**Verificação (19/11/2026)** com Edge headless contra um servidor que imita o Pages (arquivos em `/entrelinhas/`, sem cabeçalhos próprios, `POST` → 405 em HTML):
+- a página, os estilos, o `config.js` e o `script.js` carregaram pelos caminhos relativos;
+- a CSP da `<meta>` bloqueou uma conexão a um domínio fora da lista;
+- com `apiBaseUrl` vazio, com um Worker inexistente e com `apiBaseUrl` inválido, o status mostrou a mensagem de API indisponível e o botão voltou a ficar habilitado.
+
+No modo local, o roteiro de 40 passos continuou passando, com 0 erros no console.
+
+**Avisos de console esperados no Pages:**
+- 405 do `POST` enquanto o Worker não estiver configurado, seguido do diagnóstico em `console.error`;
+- 404 de `/favicon.ico`, porque o navegador procura o ícone na raiz do domínio (`professoralissonlucas.github.io/favicon.ico`), fora da pasta do projeto. Daria para evitar com `<link rel="icon" href="data:,">` no `<head>`, mas isso não foi feito, para não mexer no ícone da aba.
+
+**Para publicar:** em *Settings → Pages* do repositório, escolha *Deploy from a branch*, a branch principal e a pasta `/ (root)`. Os arquivos de servidor (`server.js`, `package.json`, `test/`) também ficam públicos no site, mas não fazem nada lá e não contêm segredos. O `.env` não vai, porque está no `.gitignore`.
 
 ## 21. Limitações atuais
 

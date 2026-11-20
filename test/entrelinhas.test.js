@@ -901,3 +901,90 @@ test("theme-study-button só é criado nos cartões de temas", () => {
   assert.match(ramoTemas, /document\.createElement\("button"\);\s*studyButton\.className = "theme-study-button"/);
   assert.equal((codigo.match(/"theme-study-button"/g) || []).length, 1, "o botão é criado em um único lugar");
 });
+
+// ---------------------------------------------------------------------------
+// GitHub Pages: config.js, caminhos relativos, CSP em <meta> e .nojekyll
+// ---------------------------------------------------------------------------
+
+test("index.html carrega config.js antes de script.js, ambos com defer", () => {
+  const html = lerArquivoDoProjeto("index.html");
+  const config = html.indexOf('<script src="config.js" defer></script>');
+  const script = html.indexOf('<script src="script.js" defer></script>');
+  assert.ok(config > 0, "config.js deve ser carregado");
+  assert.ok(script > config, "config.js deve vir antes de script.js");
+});
+
+test("todos os arquivos locais usam caminhos relativos (nada começando com /)", () => {
+  const html = lerArquivoDoProjeto("index.html");
+  const caminhos = [...html.matchAll(/\s(?:src|href|action)="([^"]*)"/g)].map((encontrado) => encontrado[1]);
+  assert.ok(caminhos.length > 0);
+  for (const caminho of caminhos) {
+    assert.equal(caminho.startsWith("/"), false, `caminho absoluto no index.html: ${caminho}`);
+  }
+  const codigo = lerArquivoDoProjeto("script.js");
+  assert.doesNotMatch(codigo, /fetch\(\s*["'`]\//, "o fetch não pode usar caminho absoluto");
+  assert.match(codigo, /montarUrlDaApi\("api\/correct", window\.ENTRELINHAS_CONFIG\)/);
+});
+
+test("CSP em <meta> no index.html é igual à do servidor e libera *.workers.dev em connect-src", () => {
+  const { politicaDeSeguranca } = require("../server.js");
+  const html = lerArquivoDoProjeto("index.html");
+  const encontrado = html.match(/<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]+)"/);
+  assert.ok(encontrado, "meta CSP não encontrada");
+  assert.equal(encontrado[1], politicaDeSeguranca);
+  assert.match(politicaDeSeguranca, /connect-src 'self' https:\/\/\*\.workers\.dev;/);
+  // A meta precisa vir antes de qualquer recurso externo para valer para todos.
+  assert.ok(html.indexOf('http-equiv="Content-Security-Policy"') < html.indexOf("fonts.googleapis.com"));
+});
+
+test("servidor local entrega config.js com a mesma CSP da página", async () => {
+  const { politicaDeSeguranca } = require("../server.js");
+  const resposta = await request(testPort, "GET", "/config.js");
+  assert.equal(resposta.status, 200);
+  assert.match(resposta.headers["content-type"], /text\/javascript/);
+  assert.match(resposta.body, /window\.ENTRELINHAS_CONFIG = \{\s*apiBaseUrl: "",\s*\};/);
+  const pagina = await request(testPort, "GET", "/");
+  assert.equal(pagina.headers["content-security-policy"], politicaDeSeguranca);
+});
+
+test("config.js define apiBaseUrl vazio por padrão e não contém chave", () => {
+  const codigo = lerArquivoDoProjeto("config.js");
+  const janela = {};
+  new Function("window", codigo)(janela);
+  assert.deepEqual(janela.ENTRELINHAS_CONFIG, { apiBaseUrl: "" });
+  assert.doesNotMatch(codigo, /AIza|AQ\.[A-Za-z0-9_-]{20,}|GEMINI_API_KEY\s*=/, "config.js é público: não pode ter chave");
+});
+
+test("montarUrlDaApi usa a mesma origem quando apiBaseUrl está vazio e a URL do Worker quando preenchido", () => {
+  const { montarUrlDaApi } = extrairFuncoesDoFrontend("montarUrlDaApi");
+  assert.equal(montarUrlDaApi("api/correct", { apiBaseUrl: "" }), "api/correct");
+  assert.equal(montarUrlDaApi("api/correct", { apiBaseUrl: "   " }), "api/correct");
+  assert.equal(montarUrlDaApi("api/correct", undefined), "api/correct", "config.js ausente = mesma origem");
+  assert.equal(montarUrlDaApi("api/correct", {}), "api/correct");
+  assert.equal(montarUrlDaApi("api/correct", { apiBaseUrl: "https://entrelinhas.exemplo.workers.dev" }), "https://entrelinhas.exemplo.workers.dev/api/correct");
+  assert.equal(montarUrlDaApi("api/correct", { apiBaseUrl: "https://entrelinhas.exemplo.workers.dev/" }), "https://entrelinhas.exemplo.workers.dev/api/correct");
+  assert.equal(montarUrlDaApi("api/correct", { apiBaseUrl: "https://exemplo.workers.dev/v1" }), "https://exemplo.workers.dev/v1/api/correct");
+  assert.throws(() => montarUrlDaApi("api/correct", { apiBaseUrl: "exemplo.workers.dev" }));
+  assert.throws(() => montarUrlDaApi("api/correct", { apiBaseUrl: "javascript:alert(1)" }));
+
+  // Caminho relativo resolvido nas duas hospedagens.
+  assert.equal(new URL("api/correct", "http://localhost:3000/").href, "http://localhost:3000/api/correct");
+  assert.equal(new URL("api/correct", "https://professoralissonlucas.github.io/entrelinhas/").href,
+    "https://professoralissonlucas.github.io/entrelinhas/api/correct");
+});
+
+test("API indisponível mostra mensagem clara no status existente", () => {
+  const codigo = lerArquivoDoProjeto("script.js");
+  assert.match(codigo, /const mensagemApiIndisponivel = "O serviço de correção está indisponível no momento\./);
+  assert.match(codigo, /error\.apiIndisponivel\s*\?\s*mensagemApiIndisponivel/);
+  // Resposta de erro sem o JSON da API (ex.: 404/405 do GitHub Pages) é tratada como API indisponível.
+  assert.match(codigo, /if \(!payload\?\.error\?\.message\) throw criarErroApiIndisponivel/);
+});
+
+test(".nojekyll existe e está vazio", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const caminho = path.join(__dirname, "..", ".nojekyll");
+  assert.equal(fs.existsSync(caminho), true);
+  assert.equal(fs.statSync(caminho).size, 0);
+});

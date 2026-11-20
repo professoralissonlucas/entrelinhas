@@ -718,6 +718,29 @@ function isAssessmentResponse(result) {
   );
 }
 
+// Monta a URL da API a partir de window.ENTRELINHAS_CONFIG (config.js).
+// - apiBaseUrl vazio: devolve o caminho relativo ("api/correct"), resolvido pela página.
+//   Funciona no modo local (http://localhost:3000/ → /api/correct) e em subpastas como /entrelinhas/.
+// - apiBaseUrl preenchido: junta a base (por exemplo, o Worker do Cloudflare) com o caminho.
+// Lança erro se apiBaseUrl não for um endereço http(s) válido.
+function montarUrlDaApi(caminho, configuracao) {
+  const base = String(configuracao?.apiBaseUrl ?? "").trim();
+  if (!base) return caminho;
+  const urlBase = new URL(base.endsWith("/") ? base : `${base}/`);
+  if (urlBase.protocol !== "https:" && urlBase.protocol !== "http:") {
+    throw new Error("apiBaseUrl deve começar com https://");
+  }
+  return new URL(caminho, urlBase).href;
+}
+
+// Mensagem exibida no status quando a API não responde ou responde algo que não é a API do Entrelinhas
+// (por exemplo, o GitHub Pages sem apiBaseUrl configurado, que devolve uma página HTML de erro).
+const mensagemApiIndisponivel = "O serviço de correção está indisponível no momento. A biblioteca de temas, gêneros e repertórios continua funcionando; tente avaliar a redação mais tarde.";
+
+function criarErroApiIndisponivel(detalhe) {
+  return Object.assign(new Error(mensagemApiIndisponivel), { apiIndisponivel: true, detalhe });
+}
+
 // Usa o campo testMode da resposta do servidor; o prefixo do summary continua valendo como alternativa.
 function isTestAssessment(result, modoTesteDaResposta) {
   if (modoTesteDaResposta === true) return true;
@@ -887,21 +910,38 @@ correctTextButton.addEventListener("click", async () => {
   // Deve ser maior que o prazo total do servidor (tempoLimitePadrao.total = 120 s em server.js), com folga.
   const browserTimeout = setTimeout(() => browserController.abort(), 135_000);
 
+  let urlDaApi = "";
   try {
-    const response = await fetch("/api/correct", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: browserController.signal,
-      body: JSON.stringify({
-        theme: essayTheme.value,
-        essay: textToCorrect.value,
-      }),
-    });
+    try {
+      urlDaApi = montarUrlDaApi("api/correct", window.ENTRELINHAS_CONFIG);
+    } catch (erroConfiguracao) {
+      throw criarErroApiIndisponivel(`apiBaseUrl inválido em config.js: ${erroConfiguracao.message}`);
+    }
+
+    let response;
+    try {
+      response = await fetch(urlDaApi, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: browserController.signal,
+        body: JSON.stringify({
+          theme: essayTheme.value,
+          essay: textToCorrect.value,
+        }),
+      });
+    } catch (erroDeRede) {
+      if (erroDeRede.name === "AbortError") throw erroDeRede;
+      // Falha de rede, DNS, CORS ou bloqueio pela Content Security Policy.
+      throw criarErroApiIndisponivel(`sem resposta de ${urlDaApi} (${erroDeRede.message})`);
+    }
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      throw new Error(payload?.error?.message || "O serviço de correção não conseguiu processar o pedido.");
+      // A API do Entrelinhas sempre responde erros em JSON; outra coisa significa que ela não está neste endereço.
+      if (!payload?.error?.message) throw criarErroApiIndisponivel(`HTTP ${response.status} sem JSON da API em ${urlDaApi}`);
+      throw new Error(payload.error.message);
     }
-    if (!payload || !isAssessmentResponse(payload.result)) {
+    if (!payload) throw criarErroApiIndisponivel(`resposta sem JSON em ${urlDaApi}`);
+    if (!isAssessmentResponse(payload.result)) {
       throw new Error("A resposta do serviço veio incompleta ou em formato inválido. Tente novamente.");
     }
     renderAssessment(payload.result, payload.testMode);
@@ -915,10 +955,15 @@ correctTextButton.addEventListener("click", async () => {
   } catch (error) {
     correctionSummary.textContent = error.name === "AbortError"
       ? "O navegador interrompeu uma avaliação que excedeu o tempo esperado. Tente novamente."
-      : error instanceof TypeError
-        ? "Não foi possível conectar ao servidor. Verifique se o backend está em execução e tente novamente."
+      : error.apiIndisponivel
+        ? mensagemApiIndisponivel
         : error.message;
-    console.error("Falha na avaliação da redação.", error);
+    if (error.apiIndisponivel) {
+      // Detalhe técnico só no console, para o responsável pela plataforma.
+      console.error(`API de correção indisponível: ${error.detalhe}. No modo local, rode "npm start"; no GitHub Pages, confira apiBaseUrl em config.js.`);
+    } else {
+      console.error("Falha na avaliação da redação.", error);
+    }
   } finally {
     clearTimeout(browserTimeout);
     correctTextButton.disabled = false;

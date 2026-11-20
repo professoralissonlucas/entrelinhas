@@ -667,10 +667,13 @@ async function assessEssay(request, response) {
   }
 }
 
+const politicaDeSeguranca = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.workers.dev; object-src 'none'; base-uri 'self'; form-action 'self'";
+
 const staticFiles = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
+  ["/config.js", ["config.js", "text/javascript; charset=utf-8"]],
   ["/script.js", ["script.js", "text/javascript; charset=utf-8"]],
 ]);
 
@@ -721,7 +724,9 @@ const server = http.createServer(async (request, response) => {
       "Content-Type": file[1],
       "Cache-Control": "no-cache",
       "X-Content-Type-Options": "nosniff",
-      "Content-Security-Policy": "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:",
+      // Mesma política da <meta http-equiv="Content-Security-Policy"> do index.html (usada no GitHub Pages).
+      // Localmente o navegador aplica as duas juntas, por isso ambas permitem o Worker (*.workers.dev).
+      "Content-Security-Policy": politicaDeSeguranca,
     });
     response.end(contents);
   });
@@ -768,6 +773,7 @@ module.exports = {
   proofreadingSchema,
   tempoLimitePadrao,
   modeloPadrao,
+  politicaDeSeguranca,
   // Permite aos testes trocar a configuração em tempo de execução.
   // fetch: função que substitui o fetch do Gemini (null restaura o fetch real).
   // tempoLimite: { avaliacao, revisao } em milissegundos (null restaura os padrões).

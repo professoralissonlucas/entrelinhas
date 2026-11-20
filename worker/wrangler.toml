@@ -1,0 +1,25 @@
+# Configuração do Cloudflare Worker do Entrelinhas (API de correção).
+# Passo a passo completo em worker/README.md.
+
+name = "entrelinhas-api"
+main = "src/index.mjs"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+# Variáveis públicas (aparecem no painel da Cloudflare).
+# A chave do Gemini NÃO fica aqui: ela é um secret, criado com `npx wrangler secret put GEMINI_API_KEY`.
+[vars]
+GEMINI_MODEL = "gemini-3.8-flash"
+ENTRELINHAS_TEST_MODE = "false"
+
+# Registros (logs) visíveis no painel da Cloudflare, em Workers → entrelinhas-api → Logs.
+[observability]
+enabled = true
+
+# OPCIONAL (recomendado): limite de uso por IP compartilhado entre todos os servidores da Cloudflare.
+# Sem isto, o limite fica na memória de cada servidor e a proteção é aproximada.
+# Para ativar (ver README, passo 7): rode `npx wrangler kv namespace create LIMITE_USO`,
+# tire o "#" das três linhas abaixo e cole o id que o comando mostrar.
+# [[kv_namespaces]]
+# binding = "LIMITE_USO"
+# id = "COLE_AQUI_O_ID_DO_KV"

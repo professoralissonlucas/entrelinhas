@@ -21,12 +21,25 @@ Contexto completo do projeto (arquitetura, API, limites, erros): veja `SPEC.MD`.
 
 6. **Manter o `SPEC.MD` atualizado** sempre que um comportamento, limite, rota, código de erro, variável de ambiente ou teste mudar.
 
+7. **Lógica da correção só no núcleo.** Validações, prompts, schemas, chamadas ao Gemini, códigos de erro e modo demonstração ficam em `lib/nucleo-correcao.js`, usado pelo `server.js` (local) e pelo `worker/src/index.mjs` (Cloudflare). Não duplique essa lógica nos dois. O núcleo deve continuar:
+   - em CommonJS (`module.exports`);
+   - sem APIs exclusivas do Node (`fs`, `path`, `http`, `process`, `Buffer`);
+   - sem estado global: a configuração chega por parâmetro.
+
 ## Comandos
 
 ```bash
 npm start   # inicia o servidor em http://localhost:3000
-npm test    # executa os testes com node:test
+npm test    # executa os testes com node:test (servidor, núcleo, frontend e Worker)
 ```
+
+Worker (dentro de `worker/`, com `npx`, sem adicionar o wrangler ao `package.json`):
+
+```bash
+npx wrangler deploy --dry-run   # empacota e confere sem publicar
+```
+
+Não rode `npx wrangler deploy`, `secret put` nem `login`: publicar é tarefa do professor (ver `worker/README.md`).
 
 ## Observações
 

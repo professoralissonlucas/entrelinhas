@@ -46,13 +46,15 @@ Ajudar estudantes a organizar ideias, encontrar repertórios e compreender a qua
 ### Stack atual
 
 - **Frontend:** HTML5, CSS3 e JavaScript puro (sem frameworks, sem módulos ES, script carregado com `defer`);
-- **Backend:** Node.js com módulos nativos `node:http`, `node:fs` e `node:path`;
+- **Backend local:** Node.js com módulos nativos `node:http`, `node:fs` e `node:path` (`server.js`);
+- **Backend na internet:** Cloudflare Worker (`worker/`), publicado com `npx wrangler deploy`;
+- **Núcleo compartilhado:** `lib/nucleo-correcao.js` (CommonJS, sem APIs exclusivas do Node), usado pelo `server.js` e pelo Worker;
 - **API de IA:** Google Gemini (`generativelanguage.googleapis.com/v1beta`, método `generateContent`), chamada via `fetch` nativo;
 - **Modelo padrão:** `gemini-3.8-flash` (configurável). O `gemini-2.5-flash` não está mais disponível para chaves novas (o Google responde 404);
 - **Testes:** executor nativo `node:test` com `node:assert/strict`;
 - **Hospedagem local:** servidor Node.js na porta 3000 por padrão.
 
-O projeto **não possui dependências npm** (nem `dependencies` nem `devDependencies`), framework frontend, banco de dados, bundler ou etapa de build. O carregamento do `.env` é feito por uma função própria (`loadLocalEnv`), sem `dotenv`.
+O projeto **não possui dependências npm** (nem `dependencies` nem `devDependencies`), framework frontend, banco de dados, bundler ou etapa de build. O carregamento do `.env` é feito por uma função própria (`loadLocalEnv`), sem `dotenv`. O `wrangler`, usado só para publicar o Worker, é executado com `npx`, sem entrar no `package.json`.
 
 ### Estrutura de arquivos
 
@@ -62,13 +64,20 @@ affonso/
 ├── styles.css              # identidade visual, layout responsivo e estados (~1.470 linhas)
 ├── config.js               # configuração pública do frontend (apiBaseUrl), carregada antes do script.js
 ├── script.js               # dados da biblioteca, renderização, busca, modal e integração com a API (~990 linhas)
-├── server.js               # servidor HTTP, estáticos, validações, prompts e integração com Gemini (~480 linhas)
+├── server.js               # servidor local: .env, estáticos, rotas e leitura do corpo; usa o núcleo (~200 linhas)
+├── lib/
+│   └── nucleo-correcao.js  # núcleo compartilhado: validações, prompts, schemas, Gemini e fluxo da correção (~690 linhas)
+├── worker/
+│   ├── src/index.mjs       # Cloudflare Worker: rotas, CORS, preflight e limite por IP; usa o núcleo
+│   ├── wrangler.toml       # configuração do Worker (GEMINI_MODEL, ENTRELINHAS_TEST_MODE, KV opcional)
+│   └── README.md           # passo a passo de publicação para o professor
 ├── test/
-│   └── entrelinhas.test.js # testes automatizados do backend (68 casos)
+│   ├── entrelinhas.test.js # testes do servidor local, do núcleo e do frontend (68 casos)
+│   └── worker.test.js      # testes do Worker, sem rede (19 casos)
 ├── package.json            # metadados, engine e scripts start/test
 ├── .env.example            # modelo de variáveis de ambiente
 ├── .nojekyll               # arquivo vazio: o GitHub Pages publica os arquivos sem processar com Jekyll
-├── .gitignore              # ignora .env e node_modules/
+├── .gitignore              # ignora .env, node_modules/, .wrangler/ e .dev.vars
 └── SPEC.MD                 # este documento
 ```
 
@@ -119,11 +128,18 @@ A aplicação ficará disponível em `http://localhost:3000`.
 ### Visão geral
 
 ```text
-Navegador (index.html + script.js + styles.css)
-   │  GET estáticos            │  POST /api/correct (JSON)
-   ▼                           ▼
-server.js (node:http) ──► Gemini: 1) avaliação  2) revisão ortográfica
+Modo local (npm start):
+Navegador ──GET estáticos / POST api/correct──► server.js (node:http) ─┐
+                                                                       ├─► lib/nucleo-correcao.js ──► Gemini
+Produção:                                                              │     (avaliação ∥ revisão)
+Navegador ◄── GitHub Pages (estáticos)                                 │
+    └──POST https://…workers.dev/api/correct──► worker/src/index.mjs ──┘
+                                                 (CORS + limite por IP)
 ```
+
+- **Núcleo compartilhado (`lib/nucleo-correcao.js`):** contém validações, prompts, schemas, chamadas ao Gemini, nova tentativa, resposta parcial, códigos de erro e modo demonstração. A função principal é `avaliarRedacao(corpo, configuracao)`, que devolve `{ status, payload, cabecalhos }` sem depender de Node nem de Workers. `interpretarCorpoJson` e `respostasComuns` padronizam os erros de corpo e rota (415, 413, 400, 405, 404).
+- **CommonJS e ESM:** o núcleo usa `module.exports`. O `server.js` faz `require("./lib/nucleo-correcao.js")`. O Worker (`.mjs`, ESM) faz `import nucleo from "../../lib/nucleo-correcao.js"`. Tanto o Node (nos testes) quanto o esbuild do `wrangler` (no deploy) entregam o `module.exports` como importação padrão, sem dependências. Isso foi conferido com `npx wrangler deploy --dry-run`: o pacote gerado contém o núcleo e executa corretamente.
+- **Regras do núcleo:** nenhuma API exclusiva do Node (`fs`, `path`, `http`, `process`, `Buffer`) e nenhum estado global. Chave, modelo, `fetch` e limites de tempo chegam pelo parâmetro `configuracao`. Um teste garante isso.
 
 ### Frontend
 
@@ -149,13 +165,10 @@ Servidor HTTP nativo que atende:
 - `POST /api/correct` para avaliação da redação;
 - `GET /api/health` para verificação de disponibilidade.
 
-`server.js` só chama `server.listen` quando executado diretamente (`require.main === module`). Quando importado, exporta para os testes:
+`server.js` só chama `server.listen` quando executado diretamente (`require.main === module`). Ele lê o `.env`, serve os estáticos, lê o corpo em partes (interrompendo ao passar de 20.000 bytes) e entrega o corpo a `nucleo.avaliarRedacao`. Quando importado, exporta para os testes:
 
-- `server`;
-- `validateInput`, `validateAssessment`, `validateProofreading`;
-- `parseCandidate`;
-- `createTestAssessment`;
-- `normalizarAvaliacao`, `normalizarRevisao`, `responseSchema`, `proofreadingSchema` e `tempoLimitePadrao`;
+- `server` e `politicaDeSeguranca`;
+- reexportados do núcleo: `validateInput`, `validateAssessment`, `validateProofreading`, `parseCandidate`, `createTestAssessment`, `normalizarAvaliacao`, `normalizarRevisao`, `filtrarCorrecoes`, `tamanhoRevisaoAceitavel`, `systemPrompt`, `proofreadingPrompt`, `responseSchema`, `proofreadingSchema`, `tempoLimitePadrao` e `modeloPadrao`;
 - `setTestConfiguration({ apiKey, model, testMode, fetch, tempoLimite })` para alterar a configuração em tempo de execução. `fetch` substitui o fetch usado nas chamadas ao Gemini (`null` restaura o real); `tempoLimite` recebe `{ avaliacao, revisao }` em ms (`null` restaura os padrões).
 
 ## 7. Estrutura da interface
@@ -576,7 +589,7 @@ Formato:
 | `PROVIDER_BUSY` | 503 | Gemini retornou 429 por minuto ou 503 (sobrecarga) na avaliação |
 | `PROVIDER_QUOTA_EXCEEDED` | 503 | Gemini retornou 429 de cota diária (`quotaId` com `PerDay`, por exemplo 20 requisições/dia no plano gratuito) |
 | `INVALID_API_KEY` | 502 | Gemini retornou 401/403, ou 400 com motivo `API_KEY_INVALID` |
-| `INVALID_MODEL` | 502 | Gemini retornou 404; a mensagem cita o modelo configurado e sugere verificar `GEMINI_MODEL` no `.env` (padrão `gemini-3.8-flash`) |
+| `INVALID_MODEL` | 502 | Gemini retornou 404; a mensagem cita o modelo configurado e sugere verificar `GEMINI_MODEL` no `.env` (servidor local) ou no `wrangler.toml` (Worker), com padrão `gemini-3.8-flash` |
 | `PROVIDER_ERROR` | 502 | outro erro HTTP do Gemini (mensagem diferente para avaliação e revisão) |
 | `INVALID_PROVIDER_RESPONSE` | 502 | avaliação fora do schema ou incompleta |
 | (sem código de erro) | 200 | a revisão falhou, mas a avaliação deu certo: resposta parcial com `proofreadingUnavailable: true` (ver seção 9) |
@@ -584,11 +597,15 @@ Formato:
 | `PROVIDER_UNAVAILABLE` | 502 | falha de rede ao contatar o Gemini |
 | `METHOD_NOT_ALLOWED` | 405 | método HTTP incorreto nas rotas de API |
 | `NOT_FOUND` | 404 | rota inexistente |
-| `FILE_READ_ERROR` | 500 | falha ao ler arquivo estático |
+| `FILE_READ_ERROR` | 500 | falha ao ler arquivo estático (só no servidor local) |
+| `RATE_LIMITED` | 429 | só no Worker: passou de 10 correções a cada 10 minutos por IP; a mensagem diz quantos minutos esperar e há cabeçalho `Retry-After` |
+| `CORS_NOT_ALLOWED` | 403 | só no Worker: pedido ou preflight vindo de uma origem fora da lista permitida |
 
 ## 17. Testes automatizados
 
-`test/entrelinhas.test.js` (executado com `npm test`) sobe o servidor em porta aleatória (`listen(0, "127.0.0.1")`) e cobre:
+`npm test` executa `test/*.test.js`: `entrelinhas.test.js` (68 casos) e `worker.test.js` (19 casos), num total de 87, todos sem rede.
+
+`test/entrelinhas.test.js` sobe o servidor em porta aleatória (`listen(0, "127.0.0.1")`) e cobre:
 
 - mensagens de `validateInput` para campos ausentes e limites, aceitando exatamente 1.500/5.000 caracteres;
 - `validateAssessment` (cinco competências, nota inválida, objeto vazio);
@@ -628,6 +645,15 @@ Formato:
   - filtragem antes do corte em 30 itens;
   - conteúdo do `proofreadingPrompt` (norma-padrão, Acordo Ortográfico, VOLP, sem reescrever o estilo, sem `draft`, `reason` na norma-padrão) e do `systemPrompt` (mantém frases e parágrafos);
   - com o Gemini simulado, descarte de correções inventadas e resposta parcial para revisões muito menores ou maiores que o original.
+
+`test/worker.test.js` importa `worker/src/index.mjs` e chama `worker.fetch(new Request(...), env)` com um Gemini simulado. Ele cobre:
+- **arquivos e ambiente:** o `wrangler.toml` (modelo, modo teste desligado, nenhuma chave no arquivo); o núcleo e o Worker sem APIs exclusivas do Node; os prompts e as validações existindo só no núcleo;
+- **rotas e CORS:** `GET /api/health` com CORS; preflight `OPTIONS` (204 e cabeçalhos); origens não permitidas recusadas (403) sem chamar o Gemini; 405 com `Allow` e 404;
+- **corpo e configuração:** validações do corpo (415, 400, 413, `INVALID_INPUT`); modo demonstração; ausência do secret (`SERVICE_NOT_CONFIGURED`);
+- **fluxo com o Gemini simulado:** correção completa usando o secret e o `GEMINI_MODEL`; mensagem de 404 citando o `wrangler.toml`; logs sem redação e sem chave;
+- **paridade:** os **mesmos 8 cenários do Gemini** rodados no `server.js` e no Worker, com status e corpo idênticos;
+- **limite por IP:** 10 correções a cada 10 minutos, 429 em português com `Retry-After` e CORS, contagem separada por IP, reinício na janela seguinte, pedidos inválidos fora da contagem e bloqueio antes do Gemini;
+- **KV:** contagem compartilhada entre dois Workers e volta automática ao limite em memória quando o KV falha.
 
 Não há testes de frontend com navegador nem testes end-to-end automatizados. Os testes não chamam o Gemini real, então não garantem que a API real aceite o schema; isso só é verificado manualmente com uma chave.
 
@@ -694,7 +720,7 @@ Características:
 - **cota do plano gratuito:** a chave atual tem **20 requisições por dia por modelo** no `gemini-3.8-flash`, e cada avaliação usa 2, o que dá cerca de 10 redações por dia para todos os usuários. O `gemini-3.7-flash` é encaminhado para o 3.8 e divide a mesma cota. Também há limite por minuto: pedidos simultâneos de alunas diferentes podem receber 429;
 - **latência do plano gratuito:** a fila no Google variou de 35 s a 112 s mesmo para respostas de 1 token; o tempo de 2 minutos anunciado no status reflete esse cenário.
 
-## 20.1 Compatibilidade com Cloudflare Workers (hospedagem futura)
+## 20.1 Cloudflare Worker (`worker/`)
 
 Consulta à documentação oficial de limites ([developers.cloudflare.com/workers/platform/limits](https://developers.cloudflare.com/workers/platform/limits)) em 19/11/2026:
 
@@ -705,10 +731,26 @@ Consulta à documentação oficial de limites ([developers.cloudflare.com/worker
 | Subrequisições por requisição | 50 (gratuito) | no máximo 3 (avaliação + revisão + 1 nova tentativa) |
 | Tempo de cada subrequisição | sem limite fixo | os limites de tempo são aplicados pelo próprio código, com `AbortController` |
 
-- `AbortController`, `setTimeout`, `fetch` e `Response` existem nos Workers, então `chamarGemini`, `executarRevisao` e o cancelamento funcionam sem mudança.
-- A migração precisará trocar `node:http` e `node:fs` pelo formato de Worker (`export default { fetch }`), ler a chave de um *secret* (`env.GEMINI_API_KEY`) e servir os estáticos pelo Workers Assets ou pelo Pages.
-- Ponto a validar na migração: o comportamento quando a aluna fecha a página no meio da avaliação. A documentação consultada não detalha isso; o recomendado é testar no deploy.
-- Com o frontend no GitHub Pages e a API no Worker, as origens são diferentes. O Worker precisará responder com CORS (`Access-Control-Allow-Origin: https://professoralissonlucas.github.io` e resposta à pré-verificação `OPTIONS`), porque o `POST` com `Content-Type: application/json` dispara essa pré-verificação.
+- `AbortController`, `setTimeout`, `fetch`, `Request`, `Response`, `TextEncoder` e `TextDecoder` existem nos Workers; por isso o núcleo roda nos dois ambientes sem mudança.
+- Ponto a validar no deploy: o comportamento quando a aluna fecha a página no meio da avaliação. A documentação consultada não detalha isso.
+
+**Implementação (`worker/src/index.mjs`):**
+
+| Item | Comportamento |
+|---|---|
+| Rotas | `POST /api/correct` e `GET /api/health`, com o mesmo comportamento do `server.js` (405 com `Allow`, 404 `NOT_FOUND`); um teste compara as respostas dos dois para 8 cenários do Gemini. |
+| Configuração | O secret `GEMINI_API_KEY` vem de `npx wrangler secret put GEMINI_API_KEY`. `GEMINI_MODEL = "gemini-3.8-flash"` e `ENTRELINHAS_TEST_MODE = "false"` ficam em `[vars]` do `wrangler.toml`. A mensagem de modelo indisponível aponta para o `wrangler.toml`. |
+| CORS | `origensPermitidas` aceita somente `https://professoralissonlucas.github.io` e `http://localhost:3000`. O cabeçalho `Access-Control-Allow-Origin` devolve a origem exata, com `Vary: Origin` e `Access-Control-Expose-Headers: Retry-After`. Todas as respostas, inclusive os erros e o 429, levam CORS, para o navegador conseguir ler a mensagem. |
+| Preflight | Em `OPTIONS` com origem permitida: 204, `Access-Control-Allow-Methods: GET, POST, OPTIONS`, `Access-Control-Allow-Headers: Content-Type` e `Access-Control-Max-Age: 86400`. Com origem não permitida: 403 `CORS_NOT_ALLOWED`. |
+| Outras origens | Um `POST` vindo do navegador de outro site recebe 403 antes de qualquer chamada ao Gemini. Pedidos sem `Origin` (curl, monitoramento) são aceitos e continuam sujeitos ao limite por IP. |
+| Limite por IP | 10 correções a cada 10 minutos (janela fixa), pelo cabeçalho `CF-Connecting-IP`. Ao passar do limite: 429 `RATE_LIMITED` com "Você atingiu o limite de 10 correções a cada 10 minutos. Aguarde cerca de N minutos e tente novamente." e `Retry-After`. Pedidos inválidos não contam; o bloqueio acontece antes de chamar o Gemini. |
+| Onde o limite é guardado | Sem configuração extra, na memória de cada instância do Worker (proteção aproximada). Com o KV `LIMITE_USO` (opcional, passo no README), é compartilhado entre todas as instâncias. Se o KV falhar (por exemplo, ao passar das 1.000 gravações/dia do plano gratuito), o Worker volta à memória e registra `[Limite] KV indisponível…`. |
+| Corpo | Lido em partes, com parada ao passar de 20.000 bytes (inclusive pelo `Content-Length`); os erros de corpo são os mesmos do servidor local. |
+| Logs | `[observability] enabled = true`: os registros `[Gemini]` aparecem no painel da Cloudflare, sem redação e sem chave. |
+
+**Verificação do empacotamento (19/11/2026):** `npx wrangler@4 deploy --dry-run` (wrangler 4.165.0) gerou o pacote, com 42,92 KiB e as variáveis `GEMINI_MODEL` e `ENTRELINHAS_TEST_MODE` reconhecidas. Executado no Node, o pacote respondeu 200 com CORS e nota 880 no modo demonstração, o que confirma o import do núcleo CommonJS.
+
+**Publicação:** passo a passo para o professor em `worker/README.md` (conta grátis, `npx wrangler login`, `npx wrangler secret put GEMINI_API_KEY`, `npx wrangler deploy` e onde colar a URL no `config.js`).
 
 ## 20.2 Publicação do frontend no GitHub Pages
 
@@ -748,7 +790,8 @@ No modo local, o roteiro de 40 passos continuou passando, com 0 erros no console
 - a nota não é validada com correção oficial de banca;
 - não há testes de frontend nem end-to-end;
 - não há build, minificação ou cache de longo prazo dos estáticos;
-- não há limitação de taxa (rate limiting) por cliente no servidor;
+- limite de uso por IP só no Worker (10 correções a cada 10 minutos); o servidor local (`npm start`) não limita;
+- sem o KV `LIMITE_USO`, o limite do Worker fica na memória de cada instância e é aproximado;
 - apenas português brasileiro.
 
 ## 22. Possíveis evoluções

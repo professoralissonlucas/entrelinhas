@@ -63,7 +63,7 @@ affonso/
 ├── script.js               # dados da biblioteca, renderização, busca, modal e integração com a API (~930 linhas)
 ├── server.js               # servidor HTTP, estáticos, validações, prompts e integração com Gemini (~480 linhas)
 ├── test/
-│   └── entrelinhas.test.js # testes automatizados do backend (38 casos)
+│   └── entrelinhas.test.js # testes automatizados do backend (55 casos)
 ├── package.json            # metadados, engine e scripts start/test
 ├── .env.example            # modelo de variáveis de ambiente
 ├── .gitignore              # ignora .env e node_modules/
@@ -186,14 +186,14 @@ Ações:
 - **Avaliar redação**: valida os campos (primeiro a redação, depois a proposta), envia a requisição e exibe o resultado;
 - **Copiar versão revisada**: copia o `correctedText` para a área de transferência.
 
-Durante a avaliação: botão desabilitado com texto "Avaliando...", status "Avaliando as competências e fazendo uma segunda revisão ortográfica...", `aria-busy="true"` no painel e timeout de 240 segundos no navegador (`AbortController`), maior que a soma dos limites do servidor.
+Durante a avaliação: botão desabilitado com texto "Avaliando...", status "Avaliando as competências e revisando a ortografia... Isso pode levar até 2 minutos.", `aria-busy="true"` no painel e timeout de 135 segundos no navegador (`AbortController`), maior que o prazo total do servidor (120 s).
 
 O painel de resultado apresenta, nesta ordem:
 
 1. cartão de nota — "Nota estimada" (ou "Nota de demonstração" no modo teste) com `soma/1000`;
 2. visão geral (`summary`);
 3. avaliação por competência — título da competência, `nota/200`, justificativa, evidência e "Para melhorar" (sugestões concatenadas, se houver);
-4. correções ortográficas e gramaticais (`original → corrigido` + motivo, ou mensagem de que não foram necessárias alterações);
+4. correções ortográficas e gramaticais (`original → corrigido` + motivo; sem itens, a mensagem de que não foram necessárias alterações ou, na resposta parcial, a de que a revisão detalhada não pôde ser concluída);
 5. texto corrigido;
 6. pontos fortes;
 7. prioridades para a próxima versão.
@@ -209,6 +209,7 @@ Títulos exibidos das competências:
 Mensagens finais de status:
 
 - sucesso: "Avaliação concluída. A nota é uma estimativa de estudo, não uma correção oficial do Enem.";
+- sucesso sem a revisão detalhada (`proofreadingUnavailable: true`): "Avaliação concluída, mas a revisão ortográfica detalhada não pôde ser concluída desta vez; o texto revisado exibido é preliminar. A nota é uma estimativa de estudo, não uma correção oficial do Enem.";
 - modo demonstração: informa que os 880 pontos são fixos e não representam avaliação real;
 - erro do servidor: exibe `error.message` retornado pela API;
 - timeout do navegador (`AbortError`) e falha de rede (`TypeError`) têm mensagens próprias.
@@ -366,15 +367,40 @@ Content-Type: application/json
 
 No modo de demonstração a resposta inclui também `"testMode": true`.
 
+### Resposta parcial (200)
+
+Se a avaliação der certo e a revisão falhar, a avaliação **não é descartada**. A revisão pode falhar por 429/503 também na nova tentativa, por cota diária esgotada, por outro erro HTTP, por tempo esgotado, por resposta inválida ou por violar a regra de 70% a 130%. Nesse caso a resposta traz:
+
+```json
+{
+  "result": {
+    "summary": "…",
+    "competencies": ["…"],
+    "correctedText": "Texto revisado pela primeira etapa (avaliação)",
+    "strengths": ["…"],
+    "nextSteps": ["…"],
+    "corrections": [],
+    "proofreadingUnavailable": true
+  }
+}
+```
+
+- `correctedText` vem da primeira etapa. Se esse texto também violar a regra de 70% a 130%, o servidor devolve o texto original do estudante, para preservar a autoria.
+- No frontend, `isAssessmentResponse` aceita `proofreadingUnavailable` (booleano); quando ele é `true`, exige `corrections` vazio.
+- O status mostra: "Avaliação concluída, mas a revisão ortográfica detalhada não pôde ser concluída desta vez; o texto revisado exibido é preliminar. A nota é uma estimativa de estudo, não uma correção oficial do Enem."
+- A seção de correções explica que a lista não pôde ser obtida, em vez de dizer que não havia erros.
+
 ### Fluxo do backend
 
 1. lê o corpo (exige `Content-Type` contendo `application/json`; limite de 20.000 bytes);
 2. valida `theme` e `essay` (`validateInput`);
 3. se `ENTRELINHAS_TEST_MODE` estiver ativo, retorna `createTestAssessment` sem chamar a IA;
 4. se não houver `GEMINI_API_KEY`, retorna 503 `SERVICE_NOT_CONFIGURED`;
-5. chama o Gemini para a avaliação e valida a resposta;
-6. chama o Gemini para a revisão ortográfica, filtra as correções inventadas (`filtrarCorrecoes`), valida a estrutura e verifica se o texto revisado tem entre 70% e 130% do tamanho da redação original;
-7. substitui `correctedText` pelo da revisão, anexa `corrections` e responde 200.
+5. inicia **ao mesmo tempo** a avaliação (`chamarGemini`) e a revisão (`executarRevisao`), com um prazo total comum de 120 s;
+6. se a avaliação falhar, responde com o erro correspondente e **cancela a revisão** em andamento, inclusive a nova tentativa, para não gastar cota;
+7. se a avaliação der certo, aguarda a revisão:
+   - revisão aprovada: substitui `correctedText` pelo da revisão, anexa `corrections` e responde 200;
+   - revisão indisponível: responde 200 com a resposta parcial (`proofreadingUnavailable: true`).
 
 ## 10. Processo de avaliação da IA
 
@@ -382,43 +408,60 @@ Ambas as chamadas passam pela função `chamarGemini` e usam `system_instruction
 
 | Etapa | Gemini 3.x (`thinkingLevel`) | Gemini 2.5 (`thinkingBudget`) | `maxOutputTokens` | Limite de tempo |
 |---|---|---|---|---|
-| Avaliação | `"low"` | 1.024 | 24.576 | 120 s |
-| Revisão | `"low"` | 512 | 16.384 | 90 s |
+| Avaliação | `"low"` | 1.024 | 24.576 | 115 s |
+| Revisão (cada tentativa) | `"low"` | 512 | 16.384 | 115 s, cortado pelo prazo restante |
+| Prazo total da requisição | — | — | — | 120 s |
+| Navegador (`script.js`) | — | — | — | 135 s |
 
 - **Raciocínio (thinking):** nos modelos Gemini 2.5 e 3.x, os tokens de raciocínio contam dentro de `maxOutputTokens`. O parâmetro é escolhido por `montarConfiguracaoRaciocinio` conforme o nome do modelo:
-  - `gemini-3*` (incluindo o padrão `gemini-3.8-flash`): `thinkingConfig.thinkingLevel`. Os valores aceitos são `low`, `medium` e `high`; `minimal` não é aceito no 3.8. O nível não é um teto rígido, por isso `maxOutputTokens` tem bastante folga (o limite do 3.8-flash é 65.536);
+  - `gemini-3*` (incluindo o padrão `gemini-3.8-flash`): `thinkingConfig.thinkingLevel`. Os valores aceitos são `low`, `medium` e `high`; `minimal` não é aceito no 3.8. `"low"` é o menor nível disponível e, nas medições, já resultou em **0 tokens de raciocínio** nas duas etapas;
   - `gemini-2.5*`: `thinkingConfig.thinkingBudget` em tokens (512 é o mínimo do `2.5-flash-lite` e vale para flash e pro);
   - outros nomes (por exemplo, `gemini-flash-latest`): nenhum `thinkingConfig`.
-- **Medição real com `gemini-3.8-flash` (19/11/2026):** o schema e o `thinkingLevel: "low"` foram aceitos (HTTP 200, `finishReason: STOP`). A avaliação usou de 1.300 a 1.650 tokens de resposta e a revisão cerca de 150, muito abaixo dos limites, sem corte por `MAX_TOKENS`. Sob alta demanda, porém, a avaliação levou de 60 a 100 s e a revisão de 45 a 70 s, e houve respostas 503 ("high demand").
-- **Limite de tempo por etapa:** cada chamada tem seu próprio `AbortController`, e o limite cobre também a leitura do corpo da resposta. A soma (210 s) fica abaixo do limite do navegador (240 s). Os valores são altos por causa das medições sob carga.
+- **Etapas em paralelo:** a revisão parte só do texto original (`{ original }`) e não depende da avaliação. Por isso as duas chamadas começam juntas e o tempo total é o da etapa mais lenta, não a soma.
+- **Regra dos limites:** limite de cada etapa (115 s) < prazo total do servidor (120 s) < limite do navegador (135 s). Há um teste automatizado que garante essa ordem e uma folga mínima de 10 s.
+- **Nova tentativa da revisão:** em 429 ou 503, a revisão espera 2 s e tenta mais uma vez, desde que ainda restem pelo menos 10 s do prazo total. Não há nova tentativa quando a cota diária acabou (429 com `quotaId` contendo `PerDay`), nem para outros erros. A avaliação não é repetida.
+- **Cancelamento:** `chamarGemini` aceita `sinalCancelamento`; o tempo esgotado gera `PROVIDER_TIMEOUT` e o cancelamento gera um erro interno `CANCELADA`.
 - **Schema compatível com o Gemini:** a API só aceita `enum` em campos `STRING`. A nota de cada competência é pedida como texto (`"0"`, `"40"` … `"200"`, `format: "enum"`) e convertida para número por `normalizarAvaliacao`. Os schemas também usam `minItems`/`maxItems` (5 competências, até 5 sugestões, de 1 a 5 pontos fortes e próximos passos, até 30 correções).
-- **Normalização:** antes da validação, `normalizarAvaliacao` converte as notas e corta listas acima do limite, e `normalizarRevisao` corta `corrections` em 30 itens. Notas fora dos níveis continuam sendo rejeitadas.
+- **Normalização:** antes da validação, `normalizarAvaliacao` converte as notas e corta listas acima do limite, e `normalizarRevisao` filtra as correções inventadas e corta `corrections` em 30 itens. Notas fora dos níveis continuam sendo rejeitadas.
+
+**Medições reais (19/11/2026), plano gratuito da chave do projeto:**
+
+| Configuração | Avaliação | Revisão | Total para a aluna |
+|---|---|---|---|
+| Antes: etapas em sequência, `gemini-3.8-flash` | 99,5 s | 32,2 s | **131,7 s** |
+| Depois: etapas em paralelo, `gemini-3.5-flash`* | 16,3 s | 62,3 s | **62,3 s** (em sequência seriam 78,5 s) |
+
+\* A cota diária do `gemini-3.8-flash` foi esgotada durante as medições, e o `gemini-3.7-flash` é encaminhado pelo Google para o 3.8, dividindo a mesma cota. Por isso o teste "depois" usou o `gemini-3.5-flash`, da mesma família 3.x, com o mesmo `thinkingLevel`.
+
+- **O gargalo é fila no Google, não geração:** um pedido de **1 token** ao `gemini-3.8-flash` levou de 35 s a 112 s. Por isso reduzir o prompt ou o raciocínio quase não muda o tempo.
+- **Prompt mais enxuto:** uma versão com limites de tamanho na saída gerou 1.265 tokens contra 1.340 do atual, sem ganho de tempo mensurável. O prompt foi mantido; só a instrução de remover repetições foi trocada por "mantenha os mesmos parágrafos e frases", porque o texto da primeira etapa agora serve de reserva na resposta parcial.
+- **Raciocínio:** `thinkingBudget: 0` e `thinkingLevel: "low"` deram o mesmo resultado (0 tokens de raciocínio). Mantém-se `"low"`, que é o parâmetro documentado para os modelos 3.x.
 
 1. **Avaliação principal** (`systemPrompt`, entrada `{ theme, essay }`)
    - avalia somente o texto e a proposta, tratando ambos como dados não confiáveis;
    - atribui a cada competência uma nota entre 0, 40, 80, 120, 160 ou 200, sem inflar notas nem descontar o mesmo problema duas vezes;
    - justifica cada nota, cita evidência literal curta (ou "Não identificada") e dá sugestões acionáveis;
-   - produz um primeiro `correctedText` que preserva tese, ideias, exemplos, estrutura e voz do estudante;
+   - produz um `correctedText` que mantém os mesmos parágrafos e frases (usado como reserva se a revisão falhar);
    - identifica pontos fortes e próximos passos.
 
-2. **Revisão independente** (`proofreadingPrompt`, entrada `{ original, draft }`)
+2. **Revisão independente** (`proofreadingPrompt`, entrada `{ original }`, em paralelo com a avaliação)
    - segue a norma-padrão do português brasileiro e a ortografia do Acordo Ortográfico de 1990 vigente (VOLP/ABL), com exemplos no próprio prompt ("ideia", "frequente", "voo", "autoestima");
    - corrige somente erros inequívocos de ortografia, acentuação, crase, concordância, regência, pontuação contrária à norma, maiúsculas e sintaxe defeituosa;
    - não reescreve o estilo, não troca vocabulário correto por sinônimos, não remove nem junta frases ou parágrafos e mantém as escolhas facultativas do estudante (vírgulas e crases facultativas);
-   - parte sempre do texto **original** do estudante e usa o `draft` da primeira etapa só como sugestão, restaurando trechos que ele tenha removido ou reescrito;
-   - devolve o texto completo e lista cada erro em `corrections` **em relação ao texto original** (não ao draft): `original` é um trecho literal da redação, `corrected` é o trecho corrigido e `reason` começa pela categoria ("Crase: …", "Acentuação: …", "Concordância verbal: …").
+   - devolve o texto completo e lista cada erro em `corrections` em relação ao texto original: `original` é um trecho literal da redação, `corrected` é o trecho corrigido e `reason` começa pela categoria ("Crase: …", "Acentuação: …", "Concordância verbal: …");
+   - o próprio `reason` também deve seguir a norma-padrão (por exemplo, "grafa-se", com hífen).
 
 **Regras aplicadas pelo servidor à revisão:**
 
 - **Correções inventadas:** `filtrarCorrecoes` descarta itens cujo `original` não existe na redação do estudante (comparação com espaços normalizados e Unicode NFC), cujo `original` é igual ao `corrected` (inclusive se só os espaços diferem) ou que estão malformados. A filtragem ocorre antes do corte em 30 itens. A quantidade descartada é registrada no log, sem os trechos.
-- **Preservação da autoria:** se o texto revisado tiver menos de 70% ou mais de 130% do tamanho da redação original (espaços normalizados), a revisão é descartada com 502 `INVALID_PROOFREADING_RESPONSE`, e a porcentagem é registrada no log.
-- **Texto exibido:** o `correctedText` final vem sempre da segunda chamada; o texto da primeira etapa é só o `draft`. O frontend mostra cada correção como `original → corrected` seguida do motivo.
+- **Preservação da autoria:** se o texto revisado tiver menos de 70% ou mais de 130% do tamanho da redação original (espaços normalizados), a revisão é descartada, a porcentagem vai para o log e a resposta passa a ser parcial.
+- **Texto exibido:** quando a revisão dá certo, o `correctedText` vem dela (segunda chamada). O frontend mostra cada correção como `original → corrected`, seguida do motivo.
 
-**Teste real (19/11/2026, `gemini-3.8-flash`):**
-- **Redação de teste:** 601 caracteres com 12 erros propositais (7 de acentuação, 2 de crase, 2 de concordância verbal, 1 de vírgula entre sujeito e verbo, além de "afim de que").
-- **Resultado:** a revisão corrigiu e listou os 12, com o motivo correto de cada um.
-- **Armadilhas:** manteve intactos os trechos corretos "acesso a livros", "acesso a bibliotecas" e "desde a infância".
-- **Tamanho:** o texto revisado ficou com 100% do tamanho original.
+**Testes reais com 12 erros propositais** (601 caracteres: 7 de acentuação, 2 de crase, 2 de concordância verbal, 1 de vírgula entre sujeito e verbo, além de "afim de que"):
+- com o `gemini-3.8-flash` (fluxo em sequência) e com o `gemini-3.5-flash` (fluxo em paralelo), a revisão corrigiu e listou os **12 erros**, com o motivo correto;
+- manteve intactos os trechos corretos "acesso a livros", "acesso a bibliotecas" e "desde a infância";
+- o texto revisado ficou com 100% do tamanho original;
+- depois da instrução sobre o `reason`, os motivos vieram com "grafa-se" e "escreve-se" corretos.
 
 `parseCandidate` concatena as partes de texto do primeiro candidato, ignorando partes marcadas como `thought` (raciocínio interno), rejeita respostas com `finishReason` `MAX_TOKENS`, `SAFETY` ou `RECITATION`, remove cercas ```` ```json ```` se existirem e faz `JSON.parse` (retorna `null` em falha).
 
@@ -449,7 +492,8 @@ Ativado por `ENTRELINHAS_TEST_MODE=true` (ou `setTestConfiguration({ testMode: t
 - redação e proposta obrigatórias (texto não vazio após `trim`), com `aria-invalid` e foco no campo faltante;
 - limites de caracteres aplicados via atributo `maxlength` (1.500 e 5.000);
 - resposta validada por `isAssessmentResponse`: cinco competências, notas apenas em {0, 40, 80, 120, 160, 200}, `summary` e `correctedText` não vazios, `corrections` obrigatório com no máximo 30 itens, `strengths` e `nextSteps` com 1 a 5 itens não vazios;
-- timeout de 240 segundos.
+- timeout de 135 segundos;
+- aceita a resposta parcial (`proofreadingUnavailable: true` com `corrections` vazio) e rejeita `proofreadingUnavailable` não booleano ou parcial com correções.
 
 ### Backend
 
@@ -459,7 +503,8 @@ Ativado por `ENTRELINHAS_TEST_MODE=true` (ou `setTestConfiguration({ testMode: t
 | `Content-Type` | deve conter `application/json` (415 caso contrário) |
 | `theme` | string não vazia, até 1.500 caracteres |
 | `essay` | string não vazia, até 5.000 caracteres |
-| Timeout com o Gemini | 120 s para a avaliação e 90 s para a revisão, contados separadamente |
+| Tempo | avaliação 115 s; revisão 115 s por tentativa; prazo total 120 s (etapas em paralelo); navegador 135 s |
+| Nova tentativa | só na revisão, 1 vez, após 2 s, em 429/503 (não na cota diária), se restarem ao menos 10 s |
 | `competencies` | exatamente 5, notas permitidas 0–200 em passos de 40 |
 | `summary`, `rationale` | até 4.000 caracteres |
 | `evidence` | até 800 caracteres |
@@ -523,13 +568,14 @@ Formato:
 | `INVALID_REQUEST` | 400 / 413 / 415 | JSON inválido, corpo grande demais, `Content-Type` incorreto ou erro de leitura |
 | `INVALID_INPUT` | 400 | tema/redação ausentes, de tipo errado ou acima do limite |
 | `SERVICE_NOT_CONFIGURED` | 503 | `GEMINI_API_KEY` ausente (fora do modo teste) |
-| `PROVIDER_BUSY` | 503 | Gemini retornou 429 (cota) ou 503 (sobrecarga) |
+| `PROVIDER_BUSY` | 503 | Gemini retornou 429 por minuto ou 503 (sobrecarga) na avaliação |
+| `PROVIDER_QUOTA_EXCEEDED` | 503 | Gemini retornou 429 de cota diária (`quotaId` com `PerDay`, por exemplo 20 requisições/dia no plano gratuito) |
 | `INVALID_API_KEY` | 502 | Gemini retornou 401/403, ou 400 com motivo `API_KEY_INVALID` |
 | `INVALID_MODEL` | 502 | Gemini retornou 404; a mensagem cita o modelo configurado e sugere verificar `GEMINI_MODEL` no `.env` (padrão `gemini-3.8-flash`) |
 | `PROVIDER_ERROR` | 502 | outro erro HTTP do Gemini (mensagem diferente para avaliação e revisão) |
 | `INVALID_PROVIDER_RESPONSE` | 502 | avaliação fora do schema ou incompleta |
-| `INVALID_PROOFREADING_RESPONSE` | 502 | revisão fora do schema ou incompleta, ou texto revisado com menos de 70% ou mais de 130% do tamanho original (mensagem própria sobre preservar a autoria) |
-| `PROVIDER_TIMEOUT` | 504 | limite de tempo da avaliação (120 s) ou da revisão (90 s) excedido; a mensagem indica a etapa |
+| (sem código de erro) | 200 | a revisão falhou, mas a avaliação deu certo: resposta parcial com `proofreadingUnavailable: true` (ver seção 9) |
+| `PROVIDER_TIMEOUT` | 504 | limite de tempo da avaliação (115 s) excedido; tempo esgotado na revisão gera resposta parcial |
 | `PROVIDER_UNAVAILABLE` | 502 | falha de rede ao contatar o Gemini |
 | `METHOD_NOT_ALLOWED` | 405 | método HTTP incorreto nas rotas de API |
 | `NOT_FOUND` | 404 | rota inexistente |
@@ -550,20 +596,34 @@ Formato:
 - alternância de modo via `setTestConfiguration`;
 - schemas sem `enum` fora de campos `STRING` e conversão da nota em texto para número;
 - `parseCandidate` ignorando partes `thought`;
-- limite do navegador em `script.js` maior que a soma dos limites do servidor;
-- **Gemini simulado** (fetch falso via `setTestConfiguration`, sem rede):
-  - sucesso nas duas etapas, conferindo `thinkingConfig`, `maxOutputTokens`, a chave só no cabeçalho e a entrada `{ original, draft }` da revisão;
+- limites de tempo: cada etapa < prazo total do servidor < limite do navegador em `script.js`, com folga de pelo menos 10 s, e espera curta antes da nova tentativa;
+- **Gemini simulado** (fetch falso via `setTestConfiguration`, sem rede; responde por etapa, porque as chamadas são paralelas):
+  - sucesso nas duas etapas, conferindo `thinkingConfig`, `maxOutputTokens`, a chave só no cabeçalho e a entrada `{ original }` da revisão;
+  - avaliação e revisão começando juntas, com tempo total próximo ao da etapa mais lenta;
   - modelo 2.5 recebendo `thinkingBudget`, e modelo fora das famílias 2.5 e 3.x sem `thinkingConfig`;
   - erro 404 de modelo (502 `INVALID_MODEL`, mensagem citando `GEMINI_MODEL`);
   - modelo padrão `gemini-3.8-flash`;
-  - resposta `MAX_TOKENS` (502, sem chamar a revisão, com log de diagnóstico);
-  - erro 429 (503 `PROVIDER_BUSY`);
+  - resposta `MAX_TOKENS` na avaliação (502, com log de diagnóstico);
+  - erro 429 na avaliação (503 `PROVIDER_BUSY`) e 429 por minuto que continua `PROVIDER_BUSY`;
+  - cota diária esgotada na avaliação (503 `PROVIDER_QUOTA_EXCEEDED`);
   - erro 401 e erro 400 `API_KEY_INVALID` (502 `INVALID_API_KEY`);
-  - tempo esgotado na avaliação e na revisão, com limites independentes (504 `PROVIDER_TIMEOUT`);
+  - tempo esgotado na avaliação (504 `PROVIDER_TIMEOUT`);
   - os logs não contêm a redação nem a chave.
-- **revisão ortográfica:** `filtrarCorrecoes` (trecho inexistente, igual ao corrigido, diferença só de espaços, item malformado), limites de 70% e 130% do tamanho, `validateProofreading` com o original, filtragem antes do corte em 30 itens, conteúdo do `proofreadingPrompt` (norma-padrão, Acordo Ortográfico, VOLP, sem reescrever o estilo) e, com o Gemini simulado, descarte de correções inventadas e de revisões muito menores ou maiores que o original;
+- **nova tentativa e resposta parcial:**
+  - 503 e 429 na revisão repetidos 1 vez, com espera, e a segunda tentativa aceita;
+  - 503 duas vezes, erro 500, tempo esgotado, formato inválido e cota diária na revisão geram 200 com `proofreadingUnavailable: true`, `corrections: []` e o texto da primeira etapa, sem repetir no caso de erro 500 e de cota diária;
+  - a nova tentativa respeita o prazo total;
+  - o texto original do estudante é usado se o rascunho da avaliação violar a autoria;
+  - a revisão é cancelada, sem nova tentativa, quando a avaliação falha;
+- **frontend** (sem navegador, lendo `script.js`): `isAssessmentResponse` aceita a resposta parcial e rejeita combinações inválidas, e o status avisa quando a revisão detalhada não foi concluída;
+- **revisão ortográfica:**
+  - `filtrarCorrecoes` (trecho inexistente, igual ao corrigido, diferença só de espaços, item malformado);
+  - limites de 70% e 130% do tamanho e `validateProofreading` com o original;
+  - filtragem antes do corte em 30 itens;
+  - conteúdo do `proofreadingPrompt` (norma-padrão, Acordo Ortográfico, VOLP, sem reescrever o estilo, sem `draft`, `reason` na norma-padrão) e do `systemPrompt` (mantém frases e parágrafos);
+  - com o Gemini simulado, descarte de correções inventadas e resposta parcial para revisões muito menores ou maiores que o original.
 
-Não há testes de frontend nem testes end-to-end. Os testes não chamam o Gemini real, então não garantem que a API real aceite o schema; isso só é verificado manualmente com uma chave.
+Não há testes de frontend com navegador nem testes end-to-end automatizados. Os testes não chamam o Gemini real, então não garantem que a API real aceite o schema; isso só é verificado manualmente com uma chave.
 
 Os testes que dependem da configuração (como `SERVICE_NOT_CONFIGURED`) a definem via `setTestConfiguration` e a restauram ao final, por isso não dependem do `.env` local.
 
@@ -617,10 +677,25 @@ Itens identificados na análise, registrados apenas para referência (não alter
 - o modo demonstração é detectado no frontend pelo prefixo do `summary`, não pelo campo `testMode`;
 - o teste "calcula corretamente os seis níveis possíveis da nota" não exercita código da aplicação;
 - o `README` não existe; este SPEC é a principal documentação;
-- o motivo (`reason`) é texto gerado pela IA e pode conter pequenos erros de digitação (no teste real apareceu "grafase" em vez de "grafa-se"); ele não é revisado;
-- se a primeira etapa remover repetições ou trechos, a revisão precisa restaurá-los; caso contrário, a regra de 70% a 130% descarta a revisão;
-- se a revisão falhar (por exemplo, com 503), a avaliação já concluída é descartada;
-- não há nova tentativa automática quando o Gemini responde 503 ("high demand"), que foi frequente nos testes reais.
+- o motivo (`reason`) é texto gerado pela IA; o prompt pede que siga a norma-padrão, mas ele não é revisado pelo servidor (antes dessa instrução, apareceu "grafase" em vez de "grafa-se");
+- a avaliação em si não tem nova tentativa: um 503 nela ainda gera erro para a aluna;
+- **cota do plano gratuito:** a chave atual tem **20 requisições por dia por modelo** no `gemini-3.8-flash`, e cada avaliação usa 2, o que dá cerca de 10 redações por dia para todos os usuários. O `gemini-3.7-flash` é encaminhado para o 3.8 e divide a mesma cota. Também há limite por minuto: pedidos simultâneos de alunas diferentes podem receber 429;
+- **latência do plano gratuito:** a fila no Google variou de 35 s a 112 s mesmo para respostas de 1 token; o tempo de 2 minutos anunciado no status reflete esse cenário.
+
+## 20.1 Compatibilidade com Cloudflare Workers (hospedagem futura)
+
+Consulta à documentação oficial de limites ([developers.cloudflare.com/workers/platform/limits](https://developers.cloudflare.com/workers/platform/limits)) em 19/11/2026:
+
+| Limite do Worker | Valor | Situação do Entrelinhas |
+|---|---|---|
+| Duração de uma requisição HTTP | sem limite | prazo total de 120 s: compatível |
+| Tempo de CPU | 10 ms (gratuito); 30 s, ampliável a 5 min (pago) | a espera pelo `fetch` não conta como CPU; o servidor só monta e valida JSON pequeno, bem abaixo de 10 ms |
+| Subrequisições por requisição | 50 (gratuito) | no máximo 3 (avaliação + revisão + 1 nova tentativa) |
+| Tempo de cada subrequisição | sem limite fixo | os limites de tempo são aplicados pelo próprio código, com `AbortController` |
+
+- `AbortController`, `setTimeout`, `fetch` e `Response` existem nos Workers, então `chamarGemini`, `executarRevisao` e o cancelamento funcionam sem mudança.
+- A migração precisará trocar `node:http` e `node:fs` pelo formato de Worker (`export default { fetch }`), ler a chave de um *secret* (`env.GEMINI_API_KEY`) e servir os estáticos pelo Workers Assets ou pelo Pages.
+- Ponto a validar na migração: o comportamento quando a aluna fecha a página no meio da avaliação. A documentação consultada não detalha isso; o recomendado é testar no deploy.
 
 ## 21. Limitações atuais
 

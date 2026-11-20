@@ -214,6 +214,8 @@ test("configuração pode alternar entre modo teste e modo real", () => {
 const chaveDeTeste = "chave-de-teste-123";
 const redacaoDeTeste = "REDACAO-SIGILOSA: a leitura leva os jovens a escola e transforma a sociedade brasileira.";
 const redacaoRevisadaDeTeste = "REDACAO-SIGILOSA: a leitura leva os jovens à escola e transforma a sociedade brasileira.";
+// Texto revisado pela primeira etapa (avaliação), diferente do da revisão para que os testes saibam de onde veio.
+const rascunhoDaAvaliacao = "REDACAO-SIGILOSA: a leitura leva os jovens à escola e transforma a sociedade brasileira!";
 const temaDeTeste = "Desafios para a formação de leitores no Brasil";
 
 function respostaGemini(conteudo, finishReason = "STOP", status = 200) {
@@ -231,10 +233,11 @@ function respostaErroGemini(status, statusProvedor, mensagem, details = []) {
   });
 }
 
-function avaliacaoDoGemini() {
+function avaliacaoDoGemini(textoCorrigido = rascunhoDaAvaliacao) {
   // O schema pede a nota como texto; o servidor deve convertê-la para número.
   const avaliacao = validAssessment();
   avaliacao.competencies = avaliacao.competencies.map((item) => ({ ...item, score: String(item.score) }));
+  avaliacao.correctedText = textoCorrigido;
   return avaliacao;
 }
 
@@ -252,23 +255,46 @@ function fetchQueNuncaResponde(_url, opcoes) {
   });
 }
 
+function atrasar(ms, valor) {
+  return () => new Promise((resolver) => setTimeout(() => resolver(typeof valor === "function" ? valor() : valor), ms));
+}
+
+// Como avaliação e revisão rodam em paralelo, o Gemini simulado responde pela ETAPA, não pela ordem das chamadas.
+// respostas: { avaliacao: [...], revisao: [...] }. Se a fila da revisão esvaziar, devolve uma revisão válida.
 async function comGeminiSimulado(respostas, executar, extras = {}) {
   const app = require("../server.js");
   const chamadas = [];
-  const fila = [...respostas];
+  const filas = { avaliacao: [...(respostas.avaliacao || [])], revisao: [...(respostas.revisao || [])] };
   const fetchSimulado = async (url, opcoes) => {
-    chamadas.push({ url, opcoes, corpo: JSON.parse(opcoes.body) });
-    const proxima = fila.shift();
+    const corpo = JSON.parse(opcoes.body);
+    const etapa = corpo.system_instruction.parts[0].text === app.proofreadingPrompt ? "revisao" : "avaliacao";
+    chamadas.push({ etapa, url, opcoes, corpo, instante: Date.now() });
+    const proxima = filas[etapa].shift() ?? (etapa === "revisao" ? respostaGemini(revisaoDoGemini()) : null);
     if (!proxima) throw new Error("Chamada inesperada ao Gemini simulado.");
     return typeof proxima === "function" ? proxima(url, opcoes) : proxima;
   };
   const registros = [];
   const consoleErrorOriginal = console.error;
   console.error = (...partes) => registros.push(partes.map(String).join(" "));
-  app.setTestConfiguration({ apiKey: chaveDeTeste, model: app.modeloPadrao, testMode: false, fetch: fetchSimulado, ...extras });
+  // Esperas curtas nos testes; cada teste pode sobrescrever qualquer limite via extras.tempoLimite.
+  app.setTestConfiguration({
+    apiKey: chaveDeTeste,
+    model: app.modeloPadrao,
+    testMode: false,
+    fetch: fetchSimulado,
+    tempoLimite: { esperaNovaTentativa: 5, minimoNovaTentativa: 0 },
+  });
+  app.setTestConfiguration(extras);
   try {
+    const inicio = Date.now();
     const resposta = await request(testPort, "POST", "/api/correct", { theme: temaDeTeste, essay: redacaoDeTeste });
-    await executar({ resposta, chamadas, registros });
+    resposta.duracaoMs = Date.now() - inicio;
+    await executar({
+      resposta,
+      chamadas,
+      registros,
+      daEtapa: (etapa) => chamadas.filter((chamada) => chamada.etapa === etapa),
+    });
   } finally {
     console.error = consoleErrorOriginal;
     app.setTestConfiguration({ apiKey: "", model: app.modeloPadrao, testMode: false, fetch: null, tempoLimite: null });
@@ -289,6 +315,26 @@ function procurarEnumForaDeString(schema, caminho = "raiz") {
   }
   if (schema.items) problemas.push(...procurarEnumForaDeString(schema.items, `${caminho}[]`));
   return problemas;
+}
+
+// Extrai a função isAssessmentResponse de script.js para testá-la sem navegador.
+function carregarValidacaoDoFrontend() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const codigo = fs.readFileSync(path.join(__dirname, "..", "script.js"), "utf8").replace(/\r\n/g, "\n");
+  const inicio = codigo.indexOf("function isAssessmentResponse(");
+  const fim = codigo.indexOf("\n}\n", inicio);
+  assert.ok(inicio >= 0 && fim > inicio, "isAssessmentResponse não encontrada em script.js");
+  return new Function(`${codigo.slice(inicio, fim + 2)}; return isAssessmentResponse;`)();
+}
+
+function lerLimiteDoNavegador() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const codigo = fs.readFileSync(path.join(__dirname, "..", "script.js"), "utf8");
+  const encontrado = codigo.match(/browserController\.abort\(\),\s*([\d_]+)\)/);
+  assert.ok(encontrado, "limite do navegador não encontrado em script.js");
+  return Number(encontrado[1].replace(/_/g, ""));
 }
 
 test("schemas enviados ao Gemini usam enum somente em campos STRING", () => {
@@ -318,29 +364,30 @@ test("ignora partes de raciocínio (thought) ao interpretar a resposta", () => {
   assert.deepEqual(parsed, avaliacao);
 });
 
-test("limite do navegador é maior que a soma dos limites do servidor", () => {
-  const fs = require("node:fs");
-  const path = require("node:path");
+test("limites de tempo: cada etapa < prazo total do servidor < limite do navegador, com folga", () => {
   const { tempoLimitePadrao } = require("../server.js");
-  const codigoCliente = fs.readFileSync(path.join(__dirname, "..", "script.js"), "utf8");
-  const encontrado = codigoCliente.match(/browserController\.abort\(\),\s*([\d_]+)\)/);
-  assert.ok(encontrado, "limite do navegador não encontrado em script.js");
-  const limiteNavegador = Number(encontrado[1].replace(/_/g, ""));
-  assert.ok(limiteNavegador > tempoLimitePadrao.avaliacao + tempoLimitePadrao.revisao);
+  const limiteNavegador = lerLimiteDoNavegador();
+  assert.ok(tempoLimitePadrao.avaliacao < tempoLimitePadrao.total, "avaliação abaixo do prazo total");
+  assert.ok(tempoLimitePadrao.revisao < tempoLimitePadrao.total, "revisão abaixo do prazo total");
+  assert.ok(limiteNavegador - tempoLimitePadrao.total >= 10_000, "pelo menos 10 s de folga para o navegador");
+  assert.ok(tempoLimitePadrao.esperaNovaTentativa > 0 && tempoLimitePadrao.esperaNovaTentativa <= 5_000, "espera curta antes da nova tentativa");
 });
 
 test("Gemini simulado: avaliação e revisão concluídas com sucesso", async () => {
-  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisaoDoGemini())], ({ resposta, chamadas, registros }) => {
+  await comGeminiSimulado({ avaliacao: [respostaGemini(avaliacaoDoGemini())], revisao: [respostaGemini(revisaoDoGemini())] }, ({ resposta, registros, daEtapa }) => {
     assert.equal(resposta.status, 200);
     const resultado = resposta.body.result;
     assert.deepEqual(resultado.competencies.map((item) => item.score), [160, 120, 160, 160, 120]);
+    // O texto exibido vem da revisão (segunda chamada), não do rascunho da avaliação.
     assert.equal(resultado.correctedText, redacaoRevisadaDeTeste);
     assert.deepEqual(resultado.corrections.map((item) => `${item.original} → ${item.corrected}`), ["a escola → à escola"]);
-    assert.equal(resultado.corrections.length, 1);
+    assert.equal("proofreadingUnavailable" in resultado, false);
     assert.equal(validateAssessment(resultado), true);
 
-    assert.equal(chamadas.length, 2);
-    const [avaliacao, revisao] = chamadas;
+    const [avaliacao] = daEtapa("avaliacao");
+    const [revisao] = daEtapa("revisao");
+    assert.equal(daEtapa("avaliacao").length, 1);
+    assert.equal(daEtapa("revisao").length, 1);
     assert.equal(avaliacao.opcoes.headers["x-goog-api-key"], chaveDeTeste);
     assert.equal(avaliacao.url.includes(chaveDeTeste), false, "a chave não deve ir na URL");
     assert.equal(avaliacao.url.includes("/models/gemini-3.8-flash:generateContent"), true);
@@ -348,11 +395,22 @@ test("Gemini simulado: avaliação e revisão concluídas com sucesso", async ()
     assert.ok(avaliacao.corpo.generationConfig.maxOutputTokens >= 16_384, "folga para raciocínio + JSON completo");
     assert.deepEqual(revisao.corpo.generationConfig.thinkingConfig, { thinkingLevel: "low" });
     assert.deepEqual(JSON.parse(avaliacao.corpo.contents[0].parts[0].text), { theme: temaDeTeste, essay: redacaoDeTeste });
-    assert.deepEqual(JSON.parse(revisao.corpo.contents[0].parts[0].text), {
-      original: redacaoDeTeste,
-      draft: "Texto integral revisado.",
-    });
+    // A revisão parte só do texto original: não depende da avaliação.
+    assert.deepEqual(JSON.parse(revisao.corpo.contents[0].parts[0].text), { original: redacaoDeTeste });
     assert.deepEqual(registros, []);
+  });
+});
+
+test("Gemini simulado: avaliação e revisão rodam em paralelo (tempo total ≈ etapa mais lenta)", async () => {
+  const respostas = {
+    avaliacao: [atrasar(150, () => respostaGemini(avaliacaoDoGemini()))],
+    revisao: [atrasar(150, () => respostaGemini(revisaoDoGemini()))],
+  };
+  await comGeminiSimulado(respostas, ({ resposta, daEtapa }) => {
+    assert.equal(resposta.status, 200);
+    const diferencaInicio = Math.abs(daEtapa("avaliacao")[0].instante - daEtapa("revisao")[0].instante);
+    assert.ok(diferencaInicio < 50, `as duas chamadas devem começar juntas (diferença de ${diferencaInicio} ms)`);
+    assert.ok(resposta.duracaoMs < 280, `em sequência levaria 300 ms ou mais; levou ${resposta.duracaoMs} ms`);
   });
 });
 
@@ -361,16 +419,16 @@ test("modelo padrão é o gemini-3.8-flash", () => {
 });
 
 test("Gemini simulado: modelos 2.5 recebem thinkingBudget em vez de thinkingLevel", async () => {
-  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisaoDoGemini())], ({ resposta, chamadas }) => {
+  await comGeminiSimulado({ avaliacao: [respostaGemini(avaliacaoDoGemini())] }, ({ resposta, daEtapa }) => {
     assert.equal(resposta.status, 200);
-    assert.deepEqual(chamadas[0].corpo.generationConfig.thinkingConfig, { thinkingBudget: 1024 });
-    assert.deepEqual(chamadas[1].corpo.generationConfig.thinkingConfig, { thinkingBudget: 512 });
+    assert.deepEqual(daEtapa("avaliacao")[0].corpo.generationConfig.thinkingConfig, { thinkingBudget: 1024 });
+    assert.deepEqual(daEtapa("revisao")[0].corpo.generationConfig.thinkingConfig, { thinkingBudget: 512 });
   }, { model: "gemini-2.5-flash" });
 });
 
 test("Gemini simulado: erro 404 de modelo sugere verificar GEMINI_MODEL", async () => {
   const erro = respostaErroGemini(404, "NOT_FOUND", "This model models/gemini-2.5-flash is no longer available to new users.");
-  await comGeminiSimulado([erro], ({ resposta, registros }) => {
+  await comGeminiSimulado({ avaliacao: [erro] }, ({ resposta, registros }) => {
     assert.equal(resposta.status, 502);
     assert.equal(resposta.body.error.code, "INVALID_MODEL");
     assert.match(resposta.body.error.message, /GEMINI_MODEL/);
@@ -381,24 +439,24 @@ test("Gemini simulado: erro 404 de modelo sugere verificar GEMINI_MODEL", async 
 });
 
 test("Gemini simulado: modelos fora das famílias 2.5 e 3.x não recebem thinkingConfig", async () => {
-  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisaoDoGemini())], ({ resposta, chamadas }) => {
+  await comGeminiSimulado({ avaliacao: [respostaGemini(avaliacaoDoGemini())] }, ({ resposta, daEtapa }) => {
     assert.equal(resposta.status, 200);
-    assert.equal("thinkingConfig" in chamadas[0].corpo.generationConfig, false);
+    assert.equal("thinkingConfig" in daEtapa("avaliacao")[0].corpo.generationConfig, false);
   }, { model: "gemini-2.0-flash" });
 });
 
-test("Gemini simulado: resposta cortada por MAX_TOKENS é rejeitada e registrada", async () => {
-  await comGeminiSimulado([respostaGemini("{\"summary\":\"Texto cort", "MAX_TOKENS")], ({ resposta, chamadas, registros }) => {
+test("Gemini simulado: resposta cortada por MAX_TOKENS na avaliação é rejeitada e registrada", async () => {
+  await comGeminiSimulado({ avaliacao: [respostaGemini("{\"summary\":\"Texto cort", "MAX_TOKENS")] }, ({ resposta, registros, daEtapa }) => {
     assert.equal(resposta.status, 502);
     assert.equal(resposta.body.error.code, "INVALID_PROVIDER_RESPONSE");
-    assert.equal(chamadas.length, 1, "a revisão não deve ser chamada");
+    assert.equal(daEtapa("avaliacao").length, 1, "a avaliação não é repetida");
     assert.ok(registros.some((linha) => linha.includes("finishReason=MAX_TOKENS") && linha.includes("tokensRaciocinio=900")));
     registrosNaoExpoemDados(registros);
   });
 });
 
-test("Gemini simulado: erro 429 vira PROVIDER_BUSY e registra a mensagem do provedor", async () => {
-  await comGeminiSimulado([respostaErroGemini(429, "RESOURCE_EXHAUSTED", "Resource has been exhausted (e.g. check quota).")], ({ resposta, registros }) => {
+test("Gemini simulado: erro 429 na avaliação vira PROVIDER_BUSY e registra a mensagem do provedor", async () => {
+  await comGeminiSimulado({ avaliacao: [respostaErroGemini(429, "RESOURCE_EXHAUSTED", "Resource has been exhausted (e.g. check quota).")] }, ({ resposta, registros }) => {
     assert.equal(resposta.status, 503);
     assert.equal(resposta.body.error.code, "PROVIDER_BUSY");
     assert.ok(registros.some((linha) => linha.includes("HTTP 429 RESOURCE_EXHAUSTED") && linha.includes("Resource has been exhausted")));
@@ -407,7 +465,7 @@ test("Gemini simulado: erro 429 vira PROVIDER_BUSY e registra a mensagem do prov
 });
 
 test("Gemini simulado: erro 401 vira INVALID_API_KEY sem expor a chave no log", async () => {
-  await comGeminiSimulado([respostaErroGemini(401, "UNAUTHENTICATED", `Chave ${chaveDeTeste} não autorizada.`)], ({ resposta, registros }) => {
+  await comGeminiSimulado({ avaliacao: [respostaErroGemini(401, "UNAUTHENTICATED", `Chave ${chaveDeTeste} não autorizada.`)] }, ({ resposta, registros }) => {
     assert.equal(resposta.status, 502);
     assert.equal(resposta.body.error.code, "INVALID_API_KEY");
     assert.ok(registros.some((linha) => linha.includes("HTTP 401") && linha.includes("[chave oculta]")));
@@ -417,32 +475,131 @@ test("Gemini simulado: erro 401 vira INVALID_API_KEY sem expor a chave no log", 
 
 test("Gemini simulado: erro 400 API_KEY_INVALID também vira INVALID_API_KEY", async () => {
   const erro = respostaErroGemini(400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key.", [{ reason: "API_KEY_INVALID" }]);
-  await comGeminiSimulado([erro], ({ resposta }) => {
+  await comGeminiSimulado({ avaliacao: [erro] }, ({ resposta }) => {
     assert.equal(resposta.status, 502);
     assert.equal(resposta.body.error.code, "INVALID_API_KEY");
   });
 });
 
 test("Gemini simulado: tempo esgotado na avaliação retorna PROVIDER_TIMEOUT", async () => {
-  await comGeminiSimulado([fetchQueNuncaResponde], ({ resposta, chamadas, registros }) => {
+  await comGeminiSimulado({ avaliacao: [fetchQueNuncaResponde] }, ({ resposta, registros, daEtapa }) => {
     assert.equal(resposta.status, 504);
     assert.equal(resposta.body.error.code, "PROVIDER_TIMEOUT");
     assert.match(resposta.body.error.message, /avaliação/);
-    assert.equal(chamadas.length, 1);
+    assert.equal(daEtapa("avaliacao").length, 1);
     registrosNaoExpoemDados(registros);
   }, { tempoLimite: { avaliacao: 50, revisao: 50 } });
 });
 
-test("Gemini simulado: cada etapa tem limite próprio e o tempo da revisão é contado à parte", async () => {
-  // A avaliação demora 80 ms (abaixo do seu limite de 150 ms); a revisão tem 100 ms próprios e trava.
-  // Com um limite único somado, a revisão teria só 70 ms; aqui ela usa seus 100 ms inteiros.
-  const avaliacaoLenta = () => new Promise((resolver) => setTimeout(() => resolver(respostaGemini(avaliacaoDoGemini())), 80));
-  await comGeminiSimulado([avaliacaoLenta, fetchQueNuncaResponde], ({ resposta, chamadas }) => {
-    assert.equal(resposta.status, 504);
-    assert.equal(resposta.body.error.code, "PROVIDER_TIMEOUT");
-    assert.match(resposta.body.error.message, /revisão ortográfica/);
-    assert.equal(chamadas.length, 2);
-  }, { tempoLimite: { avaliacao: 150, revisao: 100 } });
+// ---------------------------------------------------------------------------
+// Revisão: nova tentativa e resposta parcial (proofreadingUnavailable)
+// ---------------------------------------------------------------------------
+
+function assertRespostaParcial(resposta, textoEsperado = rascunhoDaAvaliacao) {
+  assert.equal(resposta.status, 200, "a avaliação não pode ser descartada");
+  const resultado = resposta.body.result;
+  assert.equal(resultado.proofreadingUnavailable, true);
+  assert.deepEqual(resultado.corrections, []);
+  assert.equal(resultado.correctedText, textoEsperado);
+  assert.deepEqual(resultado.competencies.map((item) => item.score), [160, 120, 160, 160, 120]);
+  assert.equal(validateAssessment(resultado), true);
+}
+
+for (const [status, statusProvedor] of [[503, "UNAVAILABLE"], [429, "RESOURCE_EXHAUSTED"]]) {
+  test(`Gemini simulado: revisão com ${status} é repetida 1 vez e a segunda tentativa vale`, async () => {
+    const respostas = {
+      avaliacao: [respostaGemini(avaliacaoDoGemini())],
+      revisao: [respostaErroGemini(status, statusProvedor, "Serviço ocupado."), respostaGemini(revisaoDoGemini())],
+    };
+    await comGeminiSimulado(respostas, ({ resposta, registros, daEtapa }) => {
+      assert.equal(resposta.status, 200);
+      assert.equal(daEtapa("revisao").length, 2);
+      const [primeira, segunda] = daEtapa("revisao");
+      assert.ok(segunda.instante - primeira.instante >= 40, "espera antes da nova tentativa");
+      assert.equal(resposta.body.result.correctedText, redacaoRevisadaDeTeste);
+      assert.equal(resposta.body.result.corrections.length, 1);
+      assert.equal("proofreadingUnavailable" in resposta.body.result, false);
+      assert.ok(registros.some((linha) => linha.includes(`HTTP ${status}`)));
+      assert.ok(registros.some((linha) => linha.includes("nova tentativa")));
+      registrosNaoExpoemDados(registros);
+    }, { tempoLimite: { esperaNovaTentativa: 50 } });
+  });
+}
+
+test("Gemini simulado: revisão com 503 duas vezes devolve a avaliação com proofreadingUnavailable", async () => {
+  const ocupado = () => respostaErroGemini(503, "UNAVAILABLE", "This model is currently experiencing high demand.");
+  const respostas = { avaliacao: [respostaGemini(avaliacaoDoGemini())], revisao: [ocupado(), ocupado(), respostaGemini(revisaoDoGemini())] };
+  await comGeminiSimulado(respostas, ({ resposta, registros, daEtapa }) => {
+    assertRespostaParcial(resposta);
+    assert.equal(daEtapa("revisao").length, 2, "no máximo 1 nova tentativa");
+    assert.ok(registros.some((linha) => linha.includes("indisponível") && linha.includes("serviço ocupado após nova tentativa")));
+    registrosNaoExpoemDados(registros);
+  });
+});
+
+test("Gemini simulado: erro na revisão que não é 429/503 não é repetido e gera resposta parcial", async () => {
+  const respostas = { avaliacao: [respostaGemini(avaliacaoDoGemini())], revisao: [respostaErroGemini(500, "INTERNAL", "Erro interno.")] };
+  await comGeminiSimulado(respostas, ({ resposta, daEtapa }) => {
+    assertRespostaParcial(resposta);
+    assert.equal(daEtapa("revisao").length, 1);
+  });
+});
+
+test("Gemini simulado: tempo esgotado na revisão gera resposta parcial", async () => {
+  const respostas = { avaliacao: [atrasar(30, () => respostaGemini(avaliacaoDoGemini()))], revisao: [fetchQueNuncaResponde] };
+  await comGeminiSimulado(respostas, ({ resposta, registros }) => {
+    assertRespostaParcial(resposta);
+    assert.ok(registros.some((linha) => linha.includes("tempo limite excedido")));
+  }, { tempoLimite: { revisao: 80 } });
+});
+
+test("Gemini simulado: revisão em formato inválido gera resposta parcial", async () => {
+  const respostas = { avaliacao: [respostaGemini(avaliacaoDoGemini())], revisao: [respostaGemini("{\"correctedText\":", "MAX_TOKENS")] };
+  await comGeminiSimulado(respostas, ({ resposta, registros }) => {
+    assertRespostaParcial(resposta);
+    assert.ok(registros.some((linha) => linha.includes("resposta fora do formato esperado")));
+  });
+});
+
+test("Gemini simulado: a nova tentativa respeita o prazo total da requisição", async () => {
+  // A espera (150 ms) consome o prazo total (200 ms); sobram ~50 ms, abaixo do mínimo de 100 ms: não há nova tentativa.
+  const respostas = {
+    avaliacao: [atrasar(170, () => respostaGemini(avaliacaoDoGemini()))],
+    revisao: [respostaErroGemini(503, "UNAVAILABLE", "Ocupado."), respostaGemini(revisaoDoGemini())],
+  };
+  await comGeminiSimulado(respostas, ({ resposta, daEtapa, registros }) => {
+    assertRespostaParcial(resposta);
+    assert.equal(daEtapa("revisao").length, 1);
+    assert.ok(registros.some((linha) => linha.includes("sem tempo restante para nova tentativa")));
+  }, { tempoLimite: { total: 200, avaliacao: 190, revisao: 190, esperaNovaTentativa: 150, minimoNovaTentativa: 100 } });
+});
+
+test("Gemini simulado: resposta parcial usa o texto original se o rascunho da avaliação violar a autoria", async () => {
+  const respostas = {
+    avaliacao: [respostaGemini(avaliacaoDoGemini("Texto resumido."))],
+    revisao: [respostaErroGemini(500, "INTERNAL", "Erro interno.")],
+  };
+  await comGeminiSimulado(respostas, ({ resposta }) => {
+    assertRespostaParcial(resposta, redacaoDeTeste);
+  });
+});
+
+test("frontend: isAssessmentResponse aceita a resposta parcial e rejeita combinações inválidas", () => {
+  const isAssessmentResponse = carregarValidacaoDoFrontend();
+  const completa = { ...validAssessment(), corrections: [{ original: "a escola", corrected: "à escola", reason: "Crase." }] };
+  assert.equal(isAssessmentResponse(completa), true);
+  assert.equal(isAssessmentResponse({ ...validAssessment(), corrections: [], proofreadingUnavailable: true }), true);
+  assert.equal(isAssessmentResponse({ ...validAssessment(), corrections: [], proofreadingUnavailable: false }), true);
+  assert.equal(isAssessmentResponse({ ...validAssessment(), corrections: [], proofreadingUnavailable: "sim" }), false);
+  assert.equal(isAssessmentResponse({ ...completa, proofreadingUnavailable: true }), false, "parcial não pode trazer correções");
+  assert.equal(isAssessmentResponse({ ...validAssessment(), proofreadingUnavailable: true }), false, "corrections continua obrigatório");
+});
+
+test("frontend: avisa no status quando a revisão detalhada não foi concluída", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const codigo = fs.readFileSync(path.join(__dirname, "..", "script.js"), "utf8");
+  assert.match(codigo, /payload\.result\.proofreadingUnavailable === true\)\s*\{\s*correctionSummary\.textContent = "Avaliação concluída, mas a revisão ortográfica detalhada não pôde ser concluída desta vez/);
 });
 
 // ---------------------------------------------------------------------------
@@ -504,8 +661,21 @@ test("proofreadingPrompt segue a norma-padrão e o Acordo Ortográfico sem reesc
   assert.match(proofreadingPrompt, /Não reescreva o estilo/);
   assert.match(proofreadingPrompt, /não troque palavras corretas/);
   assert.match(proofreadingPrompt, /copiado literalmente.*do texto "original" do estudante/);
-  assert.match(proofreadingPrompt, /comparando o "original" do estudante com o seu correctedText \(não com o draft\)/);
+  assert.match(proofreadingPrompt, /comparando o "original" do estudante com o seu correctedText/);
   assert.match(proofreadingPrompt, /dado não confiável/);
+  assert.doesNotMatch(proofreadingPrompt, /draft/, "a revisão não depende mais do rascunho da avaliação");
+});
+
+test("proofreadingPrompt pede que os motivos (reason) também sigam a norma-padrão", () => {
+  const { proofreadingPrompt } = require("../server.js");
+  assert.match(proofreadingPrompt, /O próprio reason também deve seguir a norma-padrão/);
+  assert.match(proofreadingPrompt, /"grafa-se"/);
+});
+
+test("systemPrompt pede para manter frases e parágrafos no texto corrigido da avaliação", () => {
+  const { systemPrompt } = require("../server.js");
+  assert.match(systemPrompt, /Mantenha os mesmos parágrafos e frases/);
+  assert.doesNotMatch(systemPrompt, /remova repetições/);
 });
 
 test("Gemini simulado: correções inventadas são descartadas e o texto revisado vem da segunda etapa", async () => {
@@ -517,9 +687,8 @@ test("Gemini simulado: correções inventadas são descartadas e o texto revisad
       { original: "sociedade", corrected: "sociedade", reason: "Sem alteração real." },
     ],
   };
-  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisao)], ({ resposta, registros }) => {
+  await comGeminiSimulado({ avaliacao: [respostaGemini(avaliacaoDoGemini())], revisao: [respostaGemini(revisao)] }, ({ resposta, registros }) => {
     assert.equal(resposta.status, 200);
-    // O texto da primeira etapa ("Texto integral revisado.") é substituído pelo da revisão.
     assert.equal(resposta.body.result.correctedText, redacaoRevisadaDeTeste);
     assert.deepEqual(resposta.body.result.corrections, [revisao.corrections[0]]);
     assert.ok(registros.some((linha) => linha.includes("2 correção(ões) descartada(s)")));
@@ -527,24 +696,91 @@ test("Gemini simulado: correções inventadas são descartadas e o texto revisad
   });
 });
 
-test("Gemini simulado: revisão muito menor que o original é descartada para preservar a autoria", async () => {
+test("Gemini simulado: revisão muito menor que o original é descartada (autoria) e vira resposta parcial", async () => {
   const revisao = { correctedText: "A leitura transforma.", corrections: [] };
-  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisao)], ({ resposta, registros }) => {
-    assert.equal(resposta.status, 502);
-    assert.equal(resposta.body.error.code, "INVALID_PROOFREADING_RESPONSE");
-    assert.match(resposta.body.error.message, /autoria/);
+  await comGeminiSimulado({ avaliacao: [respostaGemini(avaliacaoDoGemini())], revisao: [respostaGemini(revisao)] }, ({ resposta, registros }) => {
+    assertRespostaParcial(resposta);
     assert.ok(registros.some((linha) => /texto revisado com \d+% do tamanho do original/.test(linha)));
     registrosNaoExpoemDados(registros);
   });
 });
 
-test("Gemini simulado: revisão muito maior que o original é descartada para preservar a autoria", async () => {
+test("Gemini simulado: revisão muito maior que o original é descartada (autoria) e vira resposta parcial", async () => {
   const revisao = {
     correctedText: `${redacaoRevisadaDeTeste} Além disso, a leitura amplia o repertório cultural e fortalece a cidadania.`,
     corrections: [],
   };
-  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisao)], ({ resposta }) => {
+  await comGeminiSimulado({ avaliacao: [respostaGemini(avaliacaoDoGemini())], revisao: [respostaGemini(revisao)] }, ({ resposta }) => {
+    assertRespostaParcial(resposta);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cancelamento da revisão e cota diária
+// ---------------------------------------------------------------------------
+
+function erroCotaDiaria() {
+  return respostaErroGemini(429, "RESOURCE_EXHAUSTED", "Generate content requests per day limit exceeded on Free Tier.", [{
+    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+    violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier", quotaValue: "20" }],
+  }]);
+}
+
+test("Gemini simulado: se a avaliação falha, a revisão em andamento é cancelada", async () => {
+  let revisaoCancelada = false;
+  const revisaoQueTrava = (_url, opcoes) => {
+    opcoes.signal.addEventListener("abort", () => { revisaoCancelada = true; });
+    return fetchQueNuncaResponde(_url, opcoes);
+  };
+  const respostas = { avaliacao: [atrasar(20, () => respostaErroGemini(500, "INTERNAL", "Erro interno."))], revisao: [revisaoQueTrava] };
+  await comGeminiSimulado(respostas, async ({ resposta, daEtapa }) => {
     assert.equal(resposta.status, 502);
-    assert.equal(resposta.body.error.code, "INVALID_PROOFREADING_RESPONSE");
+    assert.equal(resposta.body.error.code, "PROVIDER_ERROR");
+    await new Promise((resolver) => setTimeout(resolver, 20));
+    assert.equal(revisaoCancelada, true, "a revisão deve ser cancelada");
+    assert.equal(daEtapa("revisao").length, 1, "sem nova tentativa depois do cancelamento");
+  });
+});
+
+test("Gemini simulado: se a avaliação falha, a revisão não faz a nova tentativa", async () => {
+  // A revisão recebe 503 e esperaria 80 ms para repetir; nesse meio-tempo a avaliação falha.
+  const respostas = {
+    avaliacao: [atrasar(30, () => respostaErroGemini(500, "INTERNAL", "Erro interno."))],
+    revisao: [respostaErroGemini(503, "UNAVAILABLE", "Ocupado."), respostaGemini(revisaoDoGemini())],
+  };
+  await comGeminiSimulado(respostas, async ({ resposta, daEtapa }) => {
+    assert.equal(resposta.status, 502);
+    await new Promise((resolver) => setTimeout(resolver, 120));
+    assert.equal(daEtapa("revisao").length, 1);
+  }, { tempoLimite: { esperaNovaTentativa: 80 } });
+});
+
+test("Gemini simulado: cota diária esgotada na avaliação gera PROVIDER_QUOTA_EXCEEDED", async () => {
+  await comGeminiSimulado({ avaliacao: [erroCotaDiaria()], revisao: [erroCotaDiaria()] }, ({ resposta, registros }) => {
+    assert.equal(resposta.status, 503);
+    assert.equal(resposta.body.error.code, "PROVIDER_QUOTA_EXCEEDED");
+    assert.match(resposta.body.error.message, /limite diário/);
+    assert.ok(registros.some((linha) => linha.includes("per day limit exceeded")));
+    registrosNaoExpoemDados(registros);
+  });
+});
+
+test("Gemini simulado: cota diária esgotada na revisão não é repetida e gera resposta parcial", async () => {
+  const respostas = { avaliacao: [atrasar(30, () => respostaGemini(avaliacaoDoGemini()))], revisao: [erroCotaDiaria(), respostaGemini(revisaoDoGemini())] };
+  await comGeminiSimulado(respostas, ({ resposta, registros, daEtapa }) => {
+    assertRespostaParcial(resposta);
+    assert.equal(daEtapa("revisao").length, 1, "repetir não adianta quando a cota do dia acabou");
+    assert.ok(registros.some((linha) => linha.includes("cota diária esgotada")));
+  });
+});
+
+test("Gemini simulado: 429 por minuto (não diário) na avaliação continua como PROVIDER_BUSY", async () => {
+  const erroPorMinuto = respostaErroGemini(429, "RESOURCE_EXHAUSTED", "Rate limit.", [{
+    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+    violations: [{ quotaId: "GenerateRequestsPerMinutePerProjectPerModel-FreeTier" }],
+  }]);
+  await comGeminiSimulado({ avaliacao: [erroPorMinuto] }, ({ resposta }) => {
+    assert.equal(resposta.status, 503);
+    assert.equal(resposta.body.error.code, "PROVIDER_BUSY");
   });
 });

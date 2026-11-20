@@ -693,7 +693,10 @@ function isAssessmentResponse(result) {
     Array.isArray(result.nextSteps) &&
     result.nextSteps.length > 0 &&
     result.nextSteps.length <= 5 &&
-    result.nextSteps.every((item) => typeof item === "string" && item.trim().length > 0)
+    result.nextSteps.every((item) => typeof item === "string" && item.trim().length > 0) &&
+    // Resposta parcial: quando a revisão detalhada falha, o servidor envia proofreadingUnavailable: true e corrections vazio.
+    (result.proofreadingUnavailable === undefined || typeof result.proofreadingUnavailable === "boolean") &&
+    (result.proofreadingUnavailable !== true || result.corrections.length === 0)
   );
 }
 
@@ -786,6 +789,8 @@ function renderAssessment(result) {
       );
       correctionList.append(correction);
     });
+  } else if (result.proofreadingUnavailable === true) {
+    correctionList.append(createTextElement("p", "no-corrections", "A revisão ortográfica detalhada não pôde ser concluída desta vez, por isso as correções não foram listadas. Avalie novamente para tentar obtê-las."));
   } else {
     correctionList.append(createTextElement("p", "no-corrections", "Não foram necessárias alterações ortográficas ou gramaticais relevantes nesta revisão."));
   }
@@ -854,12 +859,12 @@ correctTextButton.addEventListener("click", async () => {
   copyCorrectedButton.disabled = true;
   const originalButtonText = correctTextButton.innerHTML;
   correctTextButton.innerHTML = 'Avaliando... <span aria-hidden="true">✦</span>';
-  correctionSummary.textContent = "Avaliando as competências e fazendo uma segunda revisão ortográfica...";
+  correctionSummary.textContent = "Avaliando as competências e revisando a ortografia... Isso pode levar até 2 minutos.";
   correctedOutput.setAttribute("aria-busy", "true");
 
   const browserController = new AbortController();
-  // Deve ser maior que a soma dos limites do servidor (120 s da avaliação + 90 s da revisão).
-  const browserTimeout = setTimeout(() => browserController.abort(), 240_000);
+  // Deve ser maior que o prazo total do servidor (tempoLimitePadrao.total = 120 s em server.js), com folga.
+  const browserTimeout = setTimeout(() => browserController.abort(), 135_000);
 
   try {
     const response = await fetch("/api/correct", {
@@ -879,9 +884,13 @@ correctTextButton.addEventListener("click", async () => {
       throw new Error("A resposta do serviço veio incompleta ou em formato inválido. Tente novamente.");
     }
     renderAssessment(payload.result);
-    correctionSummary.textContent = isTestAssessment(payload.result)
-      ? "Resultado de demonstração concluído. Os 880 pontos são fixos e não representam uma avaliação real pelo Gemini."
-      : "Avaliação concluída. A nota é uma estimativa de estudo, não uma correção oficial do Enem.";
+    if (isTestAssessment(payload.result)) {
+      correctionSummary.textContent = "Resultado de demonstração concluído. Os 880 pontos são fixos e não representam uma avaliação real pelo Gemini.";
+    } else if (payload.result.proofreadingUnavailable === true) {
+      correctionSummary.textContent = "Avaliação concluída, mas a revisão ortográfica detalhada não pôde ser concluída desta vez; o texto revisado exibido é preliminar. A nota é uma estimativa de estudo, não uma correção oficial do Enem.";
+    } else {
+      correctionSummary.textContent = "Avaliação concluída. A nota é uma estimativa de estudo, não uma correção oficial do Enem.";
+    }
   } catch (error) {
     correctionSummary.textContent = error.name === "AbortError"
       ? "O navegador interrompeu uma avaliação que excedeu o tempo esperado. Tente novamente."

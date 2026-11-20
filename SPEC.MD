@@ -63,7 +63,7 @@ affonso/
 ├── script.js               # dados da biblioteca, renderização, busca, modal e integração com a API (~930 linhas)
 ├── server.js               # servidor HTTP, estáticos, validações, prompts e integração com Gemini (~480 linhas)
 ├── test/
-│   └── entrelinhas.test.js # testes automatizados do backend (30 casos)
+│   └── entrelinhas.test.js # testes automatizados do backend (38 casos)
 ├── package.json            # metadados, engine e scripts start/test
 ├── .env.example            # modelo de variáveis de ambiente
 ├── .gitignore              # ignora .env e node_modules/
@@ -373,7 +373,7 @@ No modo de demonstração a resposta inclui também `"testMode": true`.
 3. se `ENTRELINHAS_TEST_MODE` estiver ativo, retorna `createTestAssessment` sem chamar a IA;
 4. se não houver `GEMINI_API_KEY`, retorna 503 `SERVICE_NOT_CONFIGURED`;
 5. chama o Gemini para a avaliação e valida a resposta;
-6. chama o Gemini para a revisão ortográfica e valida a resposta;
+6. chama o Gemini para a revisão ortográfica, filtra as correções inventadas (`filtrarCorrecoes`), valida a estrutura e verifica se o texto revisado tem entre 70% e 130% do tamanho da redação original;
 7. substitui `correctedText` pelo da revisão, anexa `corrections` e responde 200.
 
 ## 10. Processo de avaliação da IA
@@ -402,10 +402,23 @@ Ambas as chamadas passam pela função `chamarGemini` e usam `system_instruction
    - identifica pontos fortes e próximos passos.
 
 2. **Revisão independente** (`proofreadingPrompt`, entrada `{ original, draft }`)
-   - revisa ortografia, acentuação, pontuação, maiúsculas, concordância, regência, crase, sintaxe e repetições desnecessárias;
-   - preserva sentido, argumentos, repertórios, estrutura e voz;
-   - não acrescenta informação nem reescreve o texto integralmente;
-   - devolve o texto completo e lista somente as alterações reais (`corrections`).
+   - segue a norma-padrão do português brasileiro e a ortografia do Acordo Ortográfico de 1990 vigente (VOLP/ABL), com exemplos no próprio prompt ("ideia", "frequente", "voo", "autoestima");
+   - corrige somente erros inequívocos de ortografia, acentuação, crase, concordância, regência, pontuação contrária à norma, maiúsculas e sintaxe defeituosa;
+   - não reescreve o estilo, não troca vocabulário correto por sinônimos, não remove nem junta frases ou parágrafos e mantém as escolhas facultativas do estudante (vírgulas e crases facultativas);
+   - parte sempre do texto **original** do estudante e usa o `draft` da primeira etapa só como sugestão, restaurando trechos que ele tenha removido ou reescrito;
+   - devolve o texto completo e lista cada erro em `corrections` **em relação ao texto original** (não ao draft): `original` é um trecho literal da redação, `corrected` é o trecho corrigido e `reason` começa pela categoria ("Crase: …", "Acentuação: …", "Concordância verbal: …").
+
+**Regras aplicadas pelo servidor à revisão:**
+
+- **Correções inventadas:** `filtrarCorrecoes` descarta itens cujo `original` não existe na redação do estudante (comparação com espaços normalizados e Unicode NFC), cujo `original` é igual ao `corrected` (inclusive se só os espaços diferem) ou que estão malformados. A filtragem ocorre antes do corte em 30 itens. A quantidade descartada é registrada no log, sem os trechos.
+- **Preservação da autoria:** se o texto revisado tiver menos de 70% ou mais de 130% do tamanho da redação original (espaços normalizados), a revisão é descartada com 502 `INVALID_PROOFREADING_RESPONSE`, e a porcentagem é registrada no log.
+- **Texto exibido:** o `correctedText` final vem sempre da segunda chamada; o texto da primeira etapa é só o `draft`. O frontend mostra cada correção como `original → corrected` seguida do motivo.
+
+**Teste real (19/11/2026, `gemini-3.8-flash`):**
+- **Redação de teste:** 601 caracteres com 12 erros propositais (7 de acentuação, 2 de crase, 2 de concordância verbal, 1 de vírgula entre sujeito e verbo, além de "afim de que").
+- **Resultado:** a revisão corrigiu e listou os 12, com o motivo correto de cada um.
+- **Armadilhas:** manteve intactos os trechos corretos "acesso a livros", "acesso a bibliotecas" e "desde a infância".
+- **Tamanho:** o texto revisado ficou com 100% do tamanho original.
 
 `parseCandidate` concatena as partes de texto do primeiro candidato, ignorando partes marcadas como `thought` (raciocínio interno), rejeita respostas com `finishReason` `MAX_TOKENS`, `SAFETY` ou `RECITATION`, remove cercas ```` ```json ```` se existirem e faz `JSON.parse` (retorna `null` em falha).
 
@@ -453,7 +466,8 @@ Ativado por `ENTRELINHAS_TEST_MODE=true` (ou `setTestConfiguration({ testMode: t
 | `suggestions` | até 5 por competência, cada uma até 500 caracteres (pode ser vazio) |
 | `strengths`, `nextSteps` | 1 a 5 itens, cada um até 500 caracteres |
 | `correctedText` | não vazio, até 10.000 caracteres |
-| `corrections` | até 30; `original` e `corrected` até 300, `reason` até 500 caracteres |
+| `corrections` | até 30 (após descartar as inventadas); `original` e `corrected` até 300, `reason` até 500 caracteres; `original` deve existir na redação e ser diferente de `corrected` |
+| `correctedText` da revisão | entre 70% e 130% do tamanho da redação original |
 
 ## 14. Segurança
 
@@ -514,7 +528,7 @@ Formato:
 | `INVALID_MODEL` | 502 | Gemini retornou 404; a mensagem cita o modelo configurado e sugere verificar `GEMINI_MODEL` no `.env` (padrão `gemini-3.8-flash`) |
 | `PROVIDER_ERROR` | 502 | outro erro HTTP do Gemini (mensagem diferente para avaliação e revisão) |
 | `INVALID_PROVIDER_RESPONSE` | 502 | avaliação fora do schema ou incompleta |
-| `INVALID_PROOFREADING_RESPONSE` | 502 | revisão fora do schema ou incompleta |
+| `INVALID_PROOFREADING_RESPONSE` | 502 | revisão fora do schema ou incompleta, ou texto revisado com menos de 70% ou mais de 130% do tamanho original (mensagem própria sobre preservar a autoria) |
 | `PROVIDER_TIMEOUT` | 504 | limite de tempo da avaliação (120 s) ou da revisão (90 s) excedido; a mensagem indica a etapa |
 | `PROVIDER_UNAVAILABLE` | 502 | falha de rede ao contatar o Gemini |
 | `METHOD_NOT_ALLOWED` | 405 | método HTTP incorreto nas rotas de API |
@@ -547,6 +561,7 @@ Formato:
   - erro 401 e erro 400 `API_KEY_INVALID` (502 `INVALID_API_KEY`);
   - tempo esgotado na avaliação e na revisão, com limites independentes (504 `PROVIDER_TIMEOUT`);
   - os logs não contêm a redação nem a chave.
+- **revisão ortográfica:** `filtrarCorrecoes` (trecho inexistente, igual ao corrigido, diferença só de espaços, item malformado), limites de 70% e 130% do tamanho, `validateProofreading` com o original, filtragem antes do corte em 30 itens, conteúdo do `proofreadingPrompt` (norma-padrão, Acordo Ortográfico, VOLP, sem reescrever o estilo) e, com o Gemini simulado, descarte de correções inventadas e de revisões muito menores ou maiores que o original;
 
 Não há testes de frontend nem testes end-to-end. Os testes não chamam o Gemini real, então não garantem que a API real aceite o schema; isso só é verificado manualmente com uma chave.
 
@@ -602,7 +617,8 @@ Itens identificados na análise, registrados apenas para referência (não alter
 - o modo demonstração é detectado no frontend pelo prefixo do `summary`, não pelo campo `testMode`;
 - o teste "calcula corretamente os seis níveis possíveis da nota" não exercita código da aplicação;
 - o `README` não existe; este SPEC é a principal documentação;
-- `corrections` lista apenas as mudanças da revisão sobre o rascunho da primeira etapa, não sobre o texto original. No teste real, uma redação com vários erros de acentuação voltou com 0 correções listadas, embora o texto corrigido estivesse revisado;
+- o motivo (`reason`) é texto gerado pela IA e pode conter pequenos erros de digitação (no teste real apareceu "grafase" em vez de "grafa-se"); ele não é revisado;
+- se a primeira etapa remover repetições ou trechos, a revisão precisa restaurá-los; caso contrário, a regra de 70% a 130% descarta a revisão;
 - se a revisão falhar (por exemplo, com 503), a avaliação já concluída é descartada;
 - não há nova tentativa automática quando o Gemini responde 503 ("high demand"), que foi frequente nos testes reais.
 

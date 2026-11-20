@@ -212,7 +212,8 @@ test("configuração pode alternar entre modo teste e modo real", () => {
 // ---------------------------------------------------------------------------
 
 const chaveDeTeste = "chave-de-teste-123";
-const redacaoDeTeste = "REDACAO-SIGILOSA: a leitura transforma a sociedade brasileira.";
+const redacaoDeTeste = "REDACAO-SIGILOSA: a leitura leva os jovens a escola e transforma a sociedade brasileira.";
+const redacaoRevisadaDeTeste = "REDACAO-SIGILOSA: a leitura leva os jovens à escola e transforma a sociedade brasileira.";
 const temaDeTeste = "Desafios para a formação de leitores no Brasil";
 
 function respostaGemini(conteudo, finishReason = "STOP", status = 200) {
@@ -239,8 +240,8 @@ function avaliacaoDoGemini() {
 
 function revisaoDoGemini() {
   return {
-    correctedText: "Texto integral revisado na segunda etapa.",
-    corrections: [{ original: "integral", corrected: "integralmente", reason: "Ajuste de clareza." }],
+    correctedText: redacaoRevisadaDeTeste,
+    corrections: [{ original: "a escola", corrected: "à escola", reason: "Crase: \"levar a\" + artigo \"a\" de \"a escola\"." }],
   };
 }
 
@@ -333,7 +334,8 @@ test("Gemini simulado: avaliação e revisão concluídas com sucesso", async ()
     assert.equal(resposta.status, 200);
     const resultado = resposta.body.result;
     assert.deepEqual(resultado.competencies.map((item) => item.score), [160, 120, 160, 160, 120]);
-    assert.equal(resultado.correctedText, "Texto integral revisado na segunda etapa.");
+    assert.equal(resultado.correctedText, redacaoRevisadaDeTeste);
+    assert.deepEqual(resultado.corrections.map((item) => `${item.original} → ${item.corrected}`), ["a escola → à escola"]);
     assert.equal(resultado.corrections.length, 1);
     assert.equal(validateAssessment(resultado), true);
 
@@ -441,4 +443,108 @@ test("Gemini simulado: cada etapa tem limite próprio e o tempo da revisão é c
     assert.match(resposta.body.error.message, /revisão ortográfica/);
     assert.equal(chamadas.length, 2);
   }, { tempoLimite: { avaliacao: 150, revisao: 100 } });
+});
+
+// ---------------------------------------------------------------------------
+// Revisão ortográfica e gramatical: correções inventadas, tamanho e prompt
+// ---------------------------------------------------------------------------
+
+test("filtrarCorrecoes descarta correções inventadas, sem efeito ou malformadas", () => {
+  const { filtrarCorrecoes } = require("../server.js");
+  const original = "Os jovens vai a escola todo dia,\nmas a leitura ainda e pouco valorizada.";
+  const filtradas = filtrarCorrecoes([
+    { original: "vai", corrected: "vão", reason: "Concordância verbal: sujeito plural." },
+    { original: "a escola", corrected: "à escola", reason: "Crase: verbo ir exige a preposição a." },
+    { original: "dia, mas", corrected: "dia; mas", reason: "Pontuação." }, // a quebra de linha do original vira espaço na comparação
+    { original: "ainda e pouco", corrected: "ainda é pouco", reason: "Acentuação: verbo ser." },
+    { original: "a cultura brasileira", corrected: "à cultura brasileira", reason: "Crase." }, // inventada: não existe no texto
+    { original: "leitura", corrected: "leitura", reason: "Sem mudança." }, // igual ao corrigido
+    { original: "todo  dia", corrected: "todo dia", reason: "Só espaço." }, // só difere em espaços
+    { original: "", corrected: "algo", reason: "Vazio." },
+    { original: "jovens", corrected: "jovens!", reason: "" },
+    null,
+  ], original);
+  assert.deepEqual(filtradas.map((item) => item.original), ["vai", "a escola", "dia, mas", "ainda e pouco"]);
+});
+
+test("tamanho do texto revisado deve ficar entre 70% e 130% do original", () => {
+  const { tamanhoRevisaoAceitavel } = require("../server.js");
+  const original = "x".repeat(100);
+  assert.equal(tamanhoRevisaoAceitavel("x".repeat(69), original), false);
+  assert.equal(tamanhoRevisaoAceitavel("x".repeat(70), original), true);
+  assert.equal(tamanhoRevisaoAceitavel("x".repeat(100), original), true);
+  assert.equal(tamanhoRevisaoAceitavel("x".repeat(130), original), true);
+  assert.equal(tamanhoRevisaoAceitavel("x".repeat(131), original), false);
+  // Espaços e quebras de linha extras não contam como mudança de tamanho.
+  assert.equal(tamanhoRevisaoAceitavel(`${"x".repeat(50)}\n\n\n${"x".repeat(50)}`, original), true);
+});
+
+test("validateProofreading com o texto original rejeita revisão encurtada", () => {
+  const original = "A leitura é essencial para a formação cidadã dos jovens brasileiros.";
+  assert.equal(validateProofreading({ correctedText: original, corrections: [] }, original), true);
+  assert.equal(validateProofreading({ correctedText: "A leitura é essencial.", corrections: [] }, original), false);
+  // Sem o original, continua validando só a estrutura (compatível com o uso anterior).
+  assert.equal(validateProofreading({ correctedText: "A leitura é essencial.", corrections: [] }), true);
+});
+
+test("correções inventadas são filtradas antes do limite de 30 itens", () => {
+  const { normalizarRevisao } = require("../server.js");
+  const inventadas = Array.from({ length: 10 }, (_, indice) => ({ original: `trecho inexistente ${indice}`, corrected: "x", reason: "Inventada." }));
+  const reais = Array.from({ length: 25 }, () => ({ original: "a escola", corrected: "à escola", reason: "Crase." }));
+  const revisao = normalizarRevisao({ correctedText: redacaoRevisadaDeTeste, corrections: [...inventadas, ...reais] }, redacaoDeTeste);
+  assert.equal(revisao.corrections.length, 25);
+  assert.equal(revisao.corrections.every((item) => item.original === "a escola"), true);
+});
+
+test("proofreadingPrompt segue a norma-padrão e o Acordo Ortográfico sem reescrever o estilo", () => {
+  const { proofreadingPrompt } = require("../server.js");
+  assert.match(proofreadingPrompt, /norma-padrão do português brasileiro/);
+  assert.match(proofreadingPrompt, /Acordo Ortográfico da Língua Portuguesa de 1990/);
+  assert.match(proofreadingPrompt, /VOLP/);
+  assert.match(proofreadingPrompt, /Não reescreva o estilo/);
+  assert.match(proofreadingPrompt, /não troque palavras corretas/);
+  assert.match(proofreadingPrompt, /copiado literalmente.*do texto "original" do estudante/);
+  assert.match(proofreadingPrompt, /comparando o "original" do estudante com o seu correctedText \(não com o draft\)/);
+  assert.match(proofreadingPrompt, /dado não confiável/);
+});
+
+test("Gemini simulado: correções inventadas são descartadas e o texto revisado vem da segunda etapa", async () => {
+  const revisao = {
+    correctedText: redacaoRevisadaDeTeste,
+    corrections: [
+      { original: "a escola", corrected: "à escola", reason: "Crase: levar a + a escola." },
+      { original: "os jovens são", corrected: "os jovens estão", reason: "Inventada: trecho não existe." },
+      { original: "sociedade", corrected: "sociedade", reason: "Sem alteração real." },
+    ],
+  };
+  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisao)], ({ resposta, registros }) => {
+    assert.equal(resposta.status, 200);
+    // O texto da primeira etapa ("Texto integral revisado.") é substituído pelo da revisão.
+    assert.equal(resposta.body.result.correctedText, redacaoRevisadaDeTeste);
+    assert.deepEqual(resposta.body.result.corrections, [revisao.corrections[0]]);
+    assert.ok(registros.some((linha) => linha.includes("2 correção(ões) descartada(s)")));
+    registrosNaoExpoemDados(registros);
+  });
+});
+
+test("Gemini simulado: revisão muito menor que o original é descartada para preservar a autoria", async () => {
+  const revisao = { correctedText: "A leitura transforma.", corrections: [] };
+  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisao)], ({ resposta, registros }) => {
+    assert.equal(resposta.status, 502);
+    assert.equal(resposta.body.error.code, "INVALID_PROOFREADING_RESPONSE");
+    assert.match(resposta.body.error.message, /autoria/);
+    assert.ok(registros.some((linha) => /texto revisado com \d+% do tamanho do original/.test(linha)));
+    registrosNaoExpoemDados(registros);
+  });
+});
+
+test("Gemini simulado: revisão muito maior que o original é descartada para preservar a autoria", async () => {
+  const revisao = {
+    correctedText: `${redacaoRevisadaDeTeste} Além disso, a leitura amplia o repertório cultural e fortalece a cidadania.`,
+    corrections: [],
+  };
+  await comGeminiSimulado([respostaGemini(avaliacaoDoGemini()), respostaGemini(revisao)], ({ resposta }) => {
+    assert.equal(resposta.status, 502);
+    assert.equal(resposta.body.error.code, "INVALID_PROOFREADING_RESPONSE");
+  });
 });

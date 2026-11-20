@@ -26,6 +26,8 @@ Contexto completo do projeto (arquitetura, API, limites, erros): veja `SPEC.MD`.
    - sem APIs exclusivas do Node (`fs`, `path`, `http`, `process`, `Buffer`);
    - sem estado global: a configuração chega por parâmetro.
 
+8. **Publicação no GitHub Pages pelo workflow** `.github/workflows/pages.yml`: ele roda `npm test` e publica só `index.html`, `styles.css`, `script.js`, `config.js` e `.nojekyll`. Se a página passar a usar outro arquivo, inclua-o em `arquivos_do_site`, ajuste a contagem e os testes do workflow.
+
 ## Comandos
 
 ```bash

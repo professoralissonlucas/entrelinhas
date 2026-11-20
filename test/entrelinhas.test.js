@@ -942,16 +942,28 @@ test("servidor local entrega config.js com a mesma CSP da página", async () => 
   const resposta = await request(testPort, "GET", "/config.js");
   assert.equal(resposta.status, 200);
   assert.match(resposta.headers["content-type"], /text\/javascript/);
-  assert.match(resposta.body, /window\.ENTRELINHAS_CONFIG = \{\s*apiBaseUrl: "",\s*\};/);
+  assert.match(resposta.body, /window\.ENTRELINHAS_CONFIG = \{\s*apiBaseUrl: "[^"]*",\s*\};/);
   const pagina = await request(testPort, "GET", "/");
   assert.equal(pagina.headers["content-security-policy"], politicaDeSeguranca);
 });
 
-test("config.js define apiBaseUrl vazio por padrão e não contém chave", () => {
+test("config.js: apiBaseUrl vazio ou URL https do Worker permitida pela CSP, e nenhuma chave", () => {
   const codigo = lerArquivoDoProjeto("config.js");
   const janela = {};
   new Function("window", codigo)(janela);
-  assert.deepEqual(janela.ENTRELINHAS_CONFIG, { apiBaseUrl: "" });
+  assert.deepEqual(Object.keys(janela.ENTRELINHAS_CONFIG), ["apiBaseUrl"], "config.js só pode ter apiBaseUrl");
+  const { apiBaseUrl } = janela.ENTRELINHAS_CONFIG;
+  assert.equal(typeof apiBaseUrl, "string");
+  if (apiBaseUrl !== "") {
+    // Preenchido: precisa ser o endereço base do Worker, aceito pela CSP (connect-src https://*.workers.dev).
+    const url = new URL(apiBaseUrl);
+    assert.equal(url.protocol, "https:", "apiBaseUrl deve começar com https://");
+    assert.match(url.hostname, /\.workers\.dev$/, "a CSP só permite chamar domínios *.workers.dev");
+    assert.equal(apiBaseUrl.endsWith("/"), false, "sem barra no final");
+    assert.doesNotMatch(url.pathname, /\/api\//, "use só o endereço base, sem /api/correct ou /api/health");
+    const { montarUrlDaApi } = extrairFuncoesDoFrontend("montarUrlDaApi");
+    assert.equal(montarUrlDaApi("api/correct", janela.ENTRELINHAS_CONFIG), `${apiBaseUrl}/api/correct`);
+  }
   assert.doesNotMatch(codigo, /AIza|AQ\.[A-Za-z0-9_-]{20,}|GEMINI_API_KEY\s*=/, "config.js é público: não pode ter chave");
 });
 
@@ -987,4 +999,66 @@ test(".nojekyll existe e está vazio", () => {
   const caminho = path.join(__dirname, "..", ".nojekyll");
   assert.equal(fs.existsSync(caminho), true);
   assert.equal(fs.statSync(caminho).size, 0);
+});
+
+// ---------------------------------------------------------------------------
+// GitHub Actions: publicação no Pages (.github/workflows/pages.yml)
+// ---------------------------------------------------------------------------
+
+function lerWorkflowDoPages() {
+  return lerArquivoDoProjeto(".github/workflows/pages.yml");
+}
+
+function arquivosPublicadosNoPages() {
+  const encontrado = lerWorkflowDoPages().match(/arquivos_do_site="([^"]+)"/);
+  assert.ok(encontrado, "lista arquivos_do_site não encontrada no workflow");
+  return encontrado[1].split(/\s+/);
+}
+
+test("workflow do Pages: roda a cada push na main e só publica se npm test passar", () => {
+  const workflow = lerWorkflowDoPages();
+  assert.doesNotMatch(workflow, /\t/, "YAML não aceita tabulação");
+  for (const [numero, linha] of workflow.split("\n").entries()) {
+    const espacos = linha.match(/^ */)[0].length;
+    assert.equal(espacos % 2, 0, `linha ${numero + 1} com indentação ímpar`);
+  }
+  assert.match(workflow, /^on:\n {2}push:\n {4}branches: \[main\]$/m);
+  assert.match(workflow, /^ {2}testes:\n(?: {4}.*\n|\n)*? {8}run: npm test$/m, "o job testes roda npm test");
+  assert.match(workflow, /^ {2}publicar:\n(?: {4}.*\n)*? {4}needs: testes$/m, "publicar depende de testes");
+});
+
+test("workflow do Pages: actions oficiais e permissões corretas", () => {
+  const workflow = lerWorkflowDoPages();
+  for (const action of ["actions/checkout@v7", "actions/setup-node@v7", "actions/configure-pages@v6", "actions/upload-pages-artifact@v5", "actions/deploy-pages@v5"]) {
+    assert.ok(workflow.includes(`uses: ${action}`), `falta ${action}`);
+  }
+  assert.match(workflow, /^permissions:\n {2}contents: read$/m, "permissão mínima no nível do workflow");
+  assert.match(workflow, / {4}permissions:\n {6}contents: read\n {6}pages: write\n {6}id-token: write\n/, "deploy-pages precisa de pages: write e id-token: write");
+  assert.match(workflow, / {4}environment:\n {6}name: github-pages\n {6}url: \$\{\{ steps\.deployment\.outputs\.page_url \}\}/);
+  assert.match(workflow, / {8}id: deployment\n {8}uses: actions\/deploy-pages@v5/);
+  assert.match(workflow, / {10}path: _site\n(?: {10}#.*\n)? {10}include-hidden-files: true/, "o .nojekyll só entra com include-hidden-files");
+});
+
+test("workflow do Pages: publica somente os arquivos do site", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const publicados = arquivosPublicadosNoPages();
+  assert.deepEqual(publicados, ["index.html", "styles.css", "script.js", "config.js", ".nojekyll"]);
+  for (const arquivo of publicados) {
+    assert.ok(fs.existsSync(path.join(__dirname, "..", arquivo)), `${arquivo} não existe`);
+  }
+  for (const proibido of ["server.js", "lib", "test", "worker", ".env", "package.json", "SPEC.MD", "CLAUDE.md"]) {
+    assert.equal(publicados.some((arquivo) => arquivo === proibido || arquivo.startsWith(`${proibido}/`)), false, `${proibido} não pode ser publicado`);
+  }
+  assert.match(lerWorkflowDoPages(), /if \[ "\$quantidade" -ne 5 \]/, "o workflow confere que só há 5 arquivos");
+});
+
+test("workflow do Pages: todo arquivo local usado pelo index.html está na lista publicada", () => {
+  const html = lerArquivoDoProjeto("index.html");
+  const locais = [...html.matchAll(/\s(?:src|href)="([^"#][^"]*)"/g)]
+    .map((encontrado) => encontrado[1])
+    .filter((caminho) => !/^https?:\/\//.test(caminho));
+  assert.deepEqual(locais.sort(), ["config.js", "script.js", "styles.css"]);
+  const publicados = arquivosPublicadosNoPages();
+  for (const caminho of locais) assert.ok(publicados.includes(caminho), `${caminho} é usado pela página mas não seria publicado`);
 });

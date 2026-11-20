@@ -72,12 +72,14 @@ affonso/
 │   ├── wrangler.toml       # configuração do Worker (GEMINI_MODEL, ENTRELINHAS_TEST_MODE, KV opcional)
 │   └── README.md           # passo a passo de publicação para o professor
 ├── test/
-│   ├── entrelinhas.test.js # testes do servidor local, do núcleo e do frontend (68 casos)
+│   ├── entrelinhas.test.js # testes do servidor local, do núcleo e do frontend (72 casos)
 │   └── worker.test.js      # testes do Worker, sem rede (19 casos)
 ├── package.json            # metadados, engine e scripts start/test
 ├── .env.example            # modelo de variáveis de ambiente
 ├── .nojekyll               # arquivo vazio: o GitHub Pages publica os arquivos sem processar com Jekyll
 ├── .gitignore              # ignora .env, node_modules/, .wrangler/ e .dev.vars
+├── .github/workflows/
+│   └── pages.yml           # GitHub Actions: roda npm test e publica só os arquivos do site no Pages
 └── SPEC.MD                 # este documento
 ```
 
@@ -603,7 +605,7 @@ Formato:
 
 ## 17. Testes automatizados
 
-`npm test` executa `test/*.test.js`: `entrelinhas.test.js` (68 casos) e `worker.test.js` (19 casos), num total de 87, todos sem rede.
+`npm test` executa `test/*.test.js`: `entrelinhas.test.js` (72 casos) e `worker.test.js` (19 casos), num total de 91, todos sem rede. O mesmo `npm test` roda no GitHub Actions antes de cada publicação (seção 20.2).
 
 `test/entrelinhas.test.js` sobe o servidor em porta aleatória (`listen(0, "127.0.0.1")`) e cobre:
 
@@ -777,7 +779,26 @@ No modo local, o roteiro de 40 passos continuou passando, com 0 erros no console
 - 405 do `POST` enquanto o Worker não estiver configurado, seguido do diagnóstico em `console.error`;
 - 404 de `/favicon.ico`, porque o navegador procura o ícone na raiz do domínio (`professoralissonlucas.github.io/favicon.ico`), fora da pasta do projeto. Daria para evitar com `<link rel="icon" href="data:,">` no `<head>`, mas isso não foi feito, para não mexer no ícone da aba.
 
-**Para publicar:** em *Settings → Pages* do repositório, escolha *Deploy from a branch*, a branch principal e a pasta `/ (root)`. Os arquivos de servidor (`server.js`, `package.json`, `test/`) também ficam públicos no site, mas não fazem nada lá e não contêm segredos. O `.env` não vai, porque está no `.gitignore`.
+### Publicação automática (GitHub Actions)
+
+O site é publicado pelo workflow `.github/workflows/pages.yml`. **Não** se usa *Deploy from a branch*.
+
+| Etapa | O que faz |
+|---|---|
+| Gatilho | Cada `push` na branch `main`; também pode ser disparado à mão (`workflow_dispatch`) na aba **Actions** → "Publicar site no GitHub Pages" → **Run workflow**. |
+| Job `testes` | `actions/checkout@v7`, `actions/setup-node@v7` (Node 24) e `npm test`. Se falhar, o job `publicar` não roda. |
+| Job `publicar` | `needs: testes`. Usa `actions/configure-pages@v6`, monta a pasta `_site` só com `index.html`, `styles.css`, `script.js`, `config.js` e `.nojekyll` (falha se faltar algum arquivo ou se a pasta não tiver exatamente 5), envia com `actions/upload-pages-artifact@v5` (`include-hidden-files: true`, necessário para o `.nojekyll`) e publica com `actions/deploy-pages@v5`. |
+| Permissões | `contents: read` no workflow; o job `publicar` adiciona `pages: write` e `id-token: write`, exigidos pelo `deploy-pages`. Ambiente `github-pages`, com a URL do site. |
+| Concorrência | Grupo `github-pages`, sem cancelar a publicação em andamento. |
+
+- **Fora do site:** `server.js`, `lib/`, `test/`, `worker/`, `package.json`, a documentação e o `.env` nunca vão para o site publicado.
+- **Testes do workflow:** conferem gatilho, dependência entre os jobs, actions, permissões, `include-hidden-files`, a lista exata de arquivos e se todo arquivo local usado pelo `index.html` está na lista.
+- **Arquivo novo no site:** se a página passar a usar outro arquivo, ele precisa entrar em `arquivos_do_site` no workflow, na contagem de 5 e nos testes.
+- **`config.js` e testes:** um teste exige que o `apiBaseUrl` do `config.js` seja vazio ou uma URL `https://…workers.dev` sem barra final e sem `/api/`. Um endereço fora do `*.workers.dev` seria bloqueado pela CSP, então o teste impede a publicação.
+
+**Ativação (uma vez):** *Settings* → *Pages* → *Build and deployment* → *Source*: **GitHub Actions**.
+
+Versões das actions conferidas na API do GitHub em 19/11/2026.
 
 ## 21. Limitações atuais
 

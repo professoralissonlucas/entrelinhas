@@ -1,0 +1,88 @@
+# Publica o site do Entrelinhas no GitHub Pages a cada push na branch main.
+# 1. Roda "npm test". Se algum teste falhar, nada é publicado.
+# 2. Publica SOMENTE os arquivos do site (lista abaixo). server.js, lib/, test/, worker/ e .env nunca vão para o Pages.
+#
+# Ativação (uma vez): Settings → Pages → Build and deployment → Source: "GitHub Actions".
+
+name: Publicar site no GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  # Permite rodar manualmente pela aba Actions → "Publicar site no GitHub Pages" → "Run workflow".
+  workflow_dispatch:
+
+# Permissão mínima por padrão; o job de publicação pede só o que precisa.
+permissions:
+  contents: read
+
+# Uma publicação por vez; se vier outro push, ele espera a atual terminar.
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  testes:
+    name: Rodar npm test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v7
+
+      - name: Instalar o Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # O projeto não tem dependências npm, então não há "npm install".
+      - name: Rodar os testes
+        run: npm test
+
+  publicar:
+    name: Publicar no GitHub Pages
+    needs: testes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v7
+
+      - name: Configurar o GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Montar a pasta do site (somente os arquivos públicos)
+        run: |
+          set -euo pipefail
+          arquivos_do_site="index.html styles.css script.js config.js .nojekyll"
+          mkdir _site
+          for arquivo in $arquivos_do_site; do
+            if [ ! -f "$arquivo" ]; then
+              echo "::error::Arquivo do site não encontrado: $arquivo"
+              exit 1
+            fi
+            cp "$arquivo" _site/
+          done
+          quantidade=$(find _site -type f | wc -l)
+          if [ "$quantidade" -ne 5 ]; then
+            echo "::error::A pasta do site deveria ter 5 arquivos, mas tem $quantidade."
+            exit 1
+          fi
+          echo "Arquivos que serão publicados:"
+          ls -la _site
+
+      - name: Enviar os arquivos do site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+          # Necessário para incluir o .nojekyll (arquivos que começam com ponto são excluídos por padrão).
+          include-hidden-files: true
+
+      - name: Publicar
+        id: deployment
+        uses: actions/deploy-pages@v5

@@ -94,12 +94,23 @@ test("valida a revisão independentemente da avaliação", () => {
   }), true);
 });
 
-test("calcula corretamente os seis níveis possíveis da nota", () => {
-  const assessment = validAssessment();
-  const total = assessment.competencies.reduce((sum, item) => sum + item.score, 0);
-  assert.equal(total, 720);
-  for (const score of [0, 40, 80, 120, 160, 200]) {
-    assert.equal([0, 40, 80, 120, 160, 200].includes(score), true);
+test("aceita somente os seis níveis de nota da matriz (0 a 200, de 40 em 40)", () => {
+  const { normalizarAvaliacao } = require("../server.js");
+  const comNota = (score) => {
+    const avaliacao = validAssessment();
+    avaliacao.competencies[0].score = score;
+    return avaliacao;
+  };
+  for (const nota of [0, 40, 80, 120, 160, 200]) {
+    assert.equal(validateAssessment(comNota(nota)), true, `a nota ${nota} deve ser aceita`);
+    // A nota chega do Gemini como texto e precisa ser convertida antes da validação.
+    assert.equal(validateAssessment(normalizarAvaliacao(comNota(String(nota)))), true, `a nota "${nota}" deve ser aceita`);
+  }
+  for (const nota of [-40, 20, 39, 150, 201, 240, 160.5, "160", "abc", null]) {
+    assert.equal(validateAssessment(comNota(nota)), false, `a nota ${JSON.stringify(nota)} deve ser rejeitada sem normalização`);
+  }
+  for (const nota of ["150", "201", "-40", "160.5", "", " "]) {
+    assert.equal(validateAssessment(normalizarAvaliacao(comNota(nota))), false, `a nota "${nota}" deve ser rejeitada`);
   }
 });
 
@@ -158,6 +169,10 @@ test("recursos estáticos e rotas desconhecidas continuam estáveis", async () =
   const missing = await request(testPort, "GET", "/recurso-inexistente");
   assert.equal(missing.status, 404);
   assert.equal(missing.body.error.code, "NOT_FOUND");
+
+  // O navegador pede /favicon.ico sozinho; responder 204 evita erro 404 no console.
+  const favicon = await request(testPort, "GET", "/favicon.ico");
+  assert.equal(favicon.status, 204);
 });
 
 test("aceita exatamente os limites definidos pelo SPEC", () => {
@@ -783,4 +798,106 @@ test("Gemini simulado: 429 por minuto (não diário) na avaliação continua com
     assert.equal(resposta.status, 503);
     assert.equal(resposta.body.error.code, "PROVIDER_BUSY");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Frontend: acessibilidade, busca, modo demonstração e botão Limpar (sem navegador)
+// ---------------------------------------------------------------------------
+
+function lerArquivoDoProjeto(nome) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  return fs.readFileSync(path.join(__dirname, "..", nome), "utf8").replace(/\r\n/g, "\n");
+}
+
+// Extrai funções de nível superior de script.js (do "function nome(" até o "}" da coluna 0).
+function extrairFuncoesDoFrontend(...nomes) {
+  const codigo = lerArquivoDoProjeto("script.js");
+  const trechos = nomes.map((nome) => {
+    const inicio = codigo.indexOf(`function ${nome}(`);
+    const fim = codigo.indexOf("\n}\n", inicio);
+    assert.ok(inicio >= 0 && fim > inicio, `${nome} não encontrada em script.js`);
+    return codigo.slice(inicio, fim + 2);
+  });
+  return new Function(`${trechos.join("\n")}; return { ${nomes.join(", ")} };`)();
+}
+
+function carregarBibliotecaDoFrontend() {
+  const codigo = lerArquivoDoProjeto("script.js");
+  return new Function(`${codigo.slice(0, codigo.indexOf("const categoryLabels"))}; return library;`)();
+}
+
+test("index.html: todo id referenciado por atributos de acessibilidade existe e é único", () => {
+  const html = lerArquivoDoProjeto("index.html");
+  const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((encontrado) => encontrado[1]);
+  assert.equal(new Set(ids).size, ids.length, "não pode haver ids duplicados");
+  const referencias = [...html.matchAll(/\s(?:aria-describedby|aria-labelledby|aria-controls|for)="([^"]+)"/g)]
+    .flatMap((encontrado) => encontrado[1].split(/\s+/));
+  assert.ok(referencias.length > 0);
+  for (const referencia of referencias) {
+    assert.ok(ids.includes(referencia), `referência para id inexistente: ${referencia}`);
+  }
+  assert.match(html, /id="text-to-correct"[^>]*aria-describedby="character-count"/);
+});
+
+test("busca de repertórios inclui os campos detalhados (o que é, origem, eixos etc.)", () => {
+  const { normalizarTextoBusca, textoPesquisavel } = extrairFuncoesDoFrontend("normalizarTextoBusca", "textoPesquisavel");
+  const library = carregarBibliotecaDoFrontend();
+  const camposDetalhados = ["whatIs", "origin", "context", "centralIdea", "societyRelation", "howToUse", "applicationExample", "attention"];
+  for (const repertorio of library.repertorios) {
+    const texto = textoPesquisavel(repertorio);
+    for (const campo of camposDetalhados) {
+      if (repertorio[campo]) assert.ok(texto.includes(repertorio[campo]), `${repertorio.title}: campo ${campo} fora da busca`);
+    }
+    for (const eixo of repertorio.axes ?? []) assert.ok(texto.includes(eixo), `${repertorio.title}: eixo ${eixo} fora da busca`);
+  }
+
+  // "Canindé" só aparece no campo "O que é" de Quarto de Despejo; a busca ignora acentos e maiúsculas.
+  const buscar = (termo) => library.repertorios
+    .filter((item) => normalizarTextoBusca(textoPesquisavel(item)).includes(normalizarTextoBusca(termo)))
+    .map((item) => item.title);
+  assert.deepEqual(buscar("CANINDE"), ["Quarto de Despejo, de Carolina Maria de Jesus"]);
+  const quarto = library.repertorios.find((item) => item.title.startsWith("Quarto de Despejo"));
+  assert.equal(normalizarTextoBusca([quarto.tag, quarto.title, quarto.description].join(" ")).includes("caninde"), false,
+    "o termo de teste não pode estar nos campos curtos");
+
+  // A busca de temas continua funcionando como antes.
+  const temas = library.temas.filter((item) => normalizarTextoBusca(textoPesquisavel(item)).includes("inclusao digital"));
+  assert.deepEqual(temas.map((item) => item.title), ["Os desafios da inclusão digital no Brasil"]);
+});
+
+test("modo demonstração é detectado pelo campo testMode, com o prefixo do summary como alternativa", () => {
+  const { isTestAssessment } = extrairFuncoesDoFrontend("isTestAssessment");
+  assert.equal(isTestAssessment({ summary: "Avaliação comum." }, true), true, "testMode: true basta");
+  assert.equal(isTestAssessment({ summary: "Modo de demonstração: teste." }, undefined), true, "prefixo como alternativa");
+  assert.equal(isTestAssessment({ summary: "Avaliação comum." }, undefined), false);
+  assert.equal(isTestAssessment({ summary: "Avaliação comum." }, false), false);
+  assert.equal(isTestAssessment(null, undefined), false);
+
+  // O servidor envia testMode: true no modo demonstração.
+  const codigo = lerArquivoDoProjeto("script.js");
+  assert.match(codigo, /renderAssessment\(payload\.result, payload\.testMode\)/);
+  assert.match(codigo, /isTestAssessment\(payload\.result, payload\.testMode\)/);
+});
+
+test("botão Limpar restaura o aviso de estimativa lido do index.html", () => {
+  const codigo = lerArquivoDoProjeto("script.js");
+  const html = lerArquivoDoProjeto("index.html");
+  assert.match(codigo, /const avisoEstimativa = correctionSummary\.textContent\.trim\(\);/);
+  const inicio = codigo.indexOf("clearTextButton.addEventListener(");
+  const fim = codigo.indexOf("\n});\n", inicio);
+  const tratadorLimpar = codigo.slice(inicio, fim);
+  assert.match(tratadorLimpar, /correctionSummary\.textContent = avisoEstimativa;/);
+  assert.doesNotMatch(tratadorLimpar, /correctionSummary\.textContent = "";/);
+  assert.match(html, /id="correction-summary"[^>]*>\s*A nota é uma estimativa para estudo, não uma correção oficial do Enem\.\s*</);
+});
+
+test("theme-study-button só é criado nos cartões de temas", () => {
+  const codigo = lerArquivoDoProjeto("script.js");
+  const inicio = codigo.indexOf('if (activeCategory === "temas") {');
+  const fim = codigo.indexOf('} else if (activeCategory === "repertorios") {', inicio);
+  assert.ok(inicio >= 0 && fim > inicio);
+  const ramoTemas = codigo.slice(inicio, fim);
+  assert.match(ramoTemas, /document\.createElement\("button"\);\s*studyButton\.className = "theme-study-button"/);
+  assert.equal((codigo.match(/"theme-study-button"/g) || []).length, 1, "o botão é criado em um único lugar");
 });

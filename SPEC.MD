@@ -63,7 +63,7 @@ affonso/
 ├── script.js               # dados da biblioteca, renderização, busca, modal e integração com a API (~930 linhas)
 ├── server.js               # servidor HTTP, estáticos, validações, prompts e integração com Gemini (~480 linhas)
 ├── test/
-│   └── entrelinhas.test.js # testes automatizados do backend (55 casos)
+│   └── entrelinhas.test.js # testes automatizados do backend (60 casos)
 ├── package.json            # metadados, engine e scripts start/test
 ├── .env.example            # modelo de variáveis de ambiente
 ├── .gitignore              # ignora .env e node_modules/
@@ -182,7 +182,7 @@ Campos:
 
 Ações:
 
-- **Limpar**: esvazia os dois campos, remove `aria-invalid`, restaura o estado vazio do resultado, apaga a mensagem de status, desabilita o botão de copiar e foca a redação;
+- **Limpar**: esvazia os dois campos, remove `aria-invalid`, restaura o estado vazio do resultado, restaura no status o aviso inicial de que a nota é uma estimativa, desabilita o botão de copiar e foca a redação;
 - **Avaliar redação**: valida os campos (primeiro a redação, depois a proposta), envia a requisição e exibe o resultado;
 - **Copiar versão revisada**: copia o `correctedText` para a área de transferência.
 
@@ -226,7 +226,7 @@ Controles:
 **Busca:** sem diferenciar maiúsculas e acentos (normalização NFD + `toLocaleLowerCase("pt-BR")`), filtrando por substring sobre:
 
 - Temas: eixo temático, título, motivação, principais desafios, teses e título/relação dos repertórios socioculturais;
-- Repertórios: tag, título e descrição curta (os campos detalhados não entram na busca).
+- Repertórios: tag, título, descrição curta e os campos detalhados do painel (o que é, origem, contexto, ideia central, relação com a sociedade, como usar, exemplo, atenção e eixos).
 
 **Cartões de Temas:** eixo temático, número sequencial, título, motivação, lista "PRINCIPAIS DESAFIOS" e botão "Ver argumentos e repertórios ↗", que abre o painel de estudo com:
 
@@ -548,6 +548,7 @@ Medidas implementadas:
 
 - método errado em `/api/correct` ou `/api/health`: 405 `METHOD_NOT_ALLOWED` com cabeçalho `Allow`;
 - qualquer outra rota ou método: 404 `NOT_FOUND` em JSON;
+- `GET /favicon.ico`: 204 sem conteúdo (o projeto não tem ícone; evita erro 404 no console);
 - falha de leitura de arquivo estático: 500 `FILE_READ_ERROR`.
 
 ## 16. Respostas de erro
@@ -591,7 +592,8 @@ Formato:
 - `parseCandidate` (JSON válido, `MAX_TOKENS`, texto não JSON, bloco cercado inválido, resposta parcial);
 - `GET /api/health` (200 e 405);
 - `POST /api/correct` com entrada vazia (400 `INVALID_INPUT`), JSON malformado (400 `INVALID_REQUEST`), `Content-Type` `text/plain` (415) e sem chave configurada (503 `SERVICE_NOT_CONFIGURED`);
-- página principal (200, `text/html`) e rota inexistente (404 `NOT_FOUND`);
+- página principal (200, `text/html`), rota inexistente (404 `NOT_FOUND`) e `/favicon.ico` (204);
+- seis níveis de nota aceitos e valores inválidos rejeitados (`validateAssessment` e `normalizarAvaliacao`);
 - `createTestAssessment` (880 pontos, notas fixas, texto preservado, prefixo do resumo);
 - alternância de modo via `setTestConfiguration`;
 - schemas sem `enum` fora de campos `STRING` e conversão da nota em texto para número;
@@ -615,7 +617,7 @@ Formato:
   - a nova tentativa respeita o prazo total;
   - o texto original do estudante é usado se o rascunho da avaliação violar a autoria;
   - a revisão é cancelada, sem nova tentativa, quando a avaliação falha;
-- **frontend** (sem navegador, lendo `script.js`): `isAssessmentResponse` aceita a resposta parcial e rejeita combinações inválidas, e o status avisa quando a revisão detalhada não foi concluída;
+- **frontend** (sem navegador, lendo `index.html` e `script.js`): `isAssessmentResponse` aceita a resposta parcial e rejeita combinações inválidas; o status avisa quando a revisão detalhada não foi concluída; ids referenciados por atributos de acessibilidade existem; a busca inclui os campos detalhados dos repertórios; o modo demonstração usa `testMode` com o prefixo como alternativa; o Limpar restaura o aviso de estimativa; `theme-study-button` só existe na aba Temas;
 - **revisão ortográfica:**
   - `filtrarCorrecoes` (trecho inexistente, igual ao corrigido, diferença só de espaços, item malformado);
   - limites de 70% e 130% do tamanho e `validateProofreading` com o original;
@@ -667,15 +669,21 @@ Características:
 
 ## 20. Pontos de atenção observados no código
 
-Itens identificados na análise, registrados apenas para referência (não alterados):
+**Itens corrigidos (19/11/2026), sem alteração visual:**
 
-- o campo da redação referencia `aria-describedby="essay-character-count"`, mas o contador tem `id="character-count"`;
-- o botão **Limpar** apaga o aviso "A nota é uma estimativa para estudo…" do status, que só volta após nova avaliação;
-- em `renderCards`, o botão `theme-study-button` é criado para todos os cartões, mas só é usado na aba Temas;
-- a busca de repertórios não considera os campos detalhados (`whatIs`, `axes` etc.);
+- `aria-describedby` do campo da redação agora aponta para o contador real (`character-count`). Um teste verifica que todo id referenciado por `aria-describedby`, `aria-labelledby`, `aria-controls` e `for` existe e é único;
+- o botão **Limpar** restaura o aviso "A nota é uma estimativa para estudo, não uma correção oficial do Enem." no status (`role="status"`). O texto é lido do próprio `index.html` na carga da página (`avisoEstimativa`), para não haver duas cópias;
+- `theme-study-button` só é criado nos cartões da aba Temas;
+- o modo demonstração é detectado pelo campo `testMode` da resposta; o prefixo "Modo de demonstração:" do `summary` continua como alternativa;
+- a busca de repertórios inclui os campos detalhados (`whatIs`, `origin`, `context`, `centralIdea`, `societyRelation`, `howToUse`, `applicationExample`, `attention` e `axes`), por meio das funções `normalizarTextoBusca` e `textoPesquisavel`;
+- o teste que não exercitava código da aplicação foi substituído por um que valida os seis níveis de nota (e a rejeição de valores inválidos) com `validateAssessment` e `normalizarAvaliacao`;
+- `GET /favicon.ico` responde 204, eliminando o único erro que aparecia no console do navegador (404 do ícone pedido automaticamente).
+
+**Verificação no navegador (Edge headless, 19/11/2026):** um roteiro de 40 passos percorreu as três abas, as buscas (com e sem acento, por campo detalhado e por eixo, além do estado vazio), o modal (tese, link para repertório, copiar, fechar por Esc, por clique no fundo e pelo ×), os três gêneros, o atalho `/` e o corretor (validações, contador, modo demonstração, copiar, Limpar e resposta parcial com Gemini simulado). Todos os passos passaram, com **0 erros ou avisos no console**.
+
+**Itens ainda em aberto:**
+
 - o vínculo tema → repertório depende da semelhança textual entre `titulo` e `title`;
-- o modo demonstração é detectado no frontend pelo prefixo do `summary`, não pelo campo `testMode`;
-- o teste "calcula corretamente os seis níveis possíveis da nota" não exercita código da aplicação;
 - o `README` não existe; este SPEC é a principal documentação;
 - o motivo (`reason`) é texto gerado pela IA; o prompt pede que siga a norma-padrão, mas ele não é revisado pelo servidor (antes dessa instrução, apareceu "grafase" em vez de "grafa-se");
 - a avaliação em si não tem nova tentativa: um 503 nela ainda gera erro para a aluna;

@@ -697,6 +697,14 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  // O navegador pede /favicon.ico automaticamente. O projeto não tem ícone: responde 204 (sem conteúdo)
+  // para não gerar erro 404 no console. A aba continua com o ícone padrão do navegador.
+  if (url.pathname === "/favicon.ico" && request.method === "GET") {
+    response.writeHead(204, { "Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff" });
+    response.end();
+    return;
+  }
+
   const file = staticFiles.get(url.pathname);
   if (request.method !== "GET" || !file) {
     sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Página não encontrada." } });

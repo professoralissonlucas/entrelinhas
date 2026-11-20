@@ -251,6 +251,38 @@ const copyStatus = document.querySelector("#copy-status");
 let activeCategory = "temas";
 let activeGenreId = genreGuides[0].id;
 
+// Normaliza um texto para a busca: ignora acentos e diferenças entre maiúsculas e minúsculas.
+function normalizarTextoBusca(valor) {
+  return String(valor ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLocaleLowerCase("pt-BR");
+}
+
+// Reúne todo o texto pesquisável de um tema ou repertório.
+// Nos repertórios, inclui também os campos detalhados exibidos no painel (o que é, origem, eixos etc.).
+function textoPesquisavel(item) {
+  return [
+    item.eixoTematico,
+    item.tag,
+    item.title,
+    item.motivacao,
+    item.description,
+    ...(item.principaisDesafios ?? []),
+    ...(item.teses ?? []),
+    ...(item.repertoriosSocioculturais ?? []).flatMap(({ categoria, titulo, relacao }) => [categoria, titulo, relacao]),
+    item.whatIs,
+    item.origin,
+    item.context,
+    item.centralIdea,
+    item.societyRelation,
+    item.howToUse,
+    item.applicationExample,
+    item.attention,
+    ...(item.axes ?? []),
+  ].filter(Boolean).join(" ");
+}
+
 function renderCards() {
   const isGenreGuide = activeCategory === "generos";
   genreGuide.hidden = !isGenreGuide;
@@ -265,24 +297,8 @@ function renderCards() {
     return;
   }
 
-  const normalizeSearchText = (value) => String(value ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLocaleLowerCase("pt-BR");
-
-  const query = normalizeSearchText(searchInput.value.trim());
-  const cards = library[activeCategory].filter((item) =>
-    normalizeSearchText([
-      item.eixoTematico,
-      item.tag,
-      item.title,
-      item.motivacao,
-      item.description,
-      ...(item.principaisDesafios ?? []),
-      ...(item.teses ?? []),
-      ...(item.repertoriosSocioculturais ?? []).flatMap(({ titulo, relacao }) => [titulo, relacao]),
-    ].join(" ")).includes(query),
-  );
+  const query = normalizarTextoBusca(searchInput.value.trim());
+  const cards = library[activeCategory].filter((item) => normalizarTextoBusca(textoPesquisavel(item)).includes(query));
 
   resultsLabel.textContent = categoryLabels[activeCategory];
   resultsCount.textContent = `${cards.length} ${cards.length === 1 ? "resultado" : "resultados"}`;
@@ -329,30 +345,30 @@ function renderCards() {
         card.append(challenges);
       }
 
+      // Cada categoria cria apenas o botão que usa.
+      if (activeCategory === "temas") {
         const studyButton = document.createElement("button");
         studyButton.className = "theme-study-button";
         studyButton.type = "button";
         studyButton.dataset.themeIndex = String(library.temas.indexOf(item));
         studyButton.textContent = "Ver argumentos e repertórios ↗";
-
-        if (activeCategory === "temas") {
-          card.append(studyButton);
-        } else if (activeCategory === "repertorios") {
-          const repertoryButton = document.createElement("button");
-          repertoryButton.className = "repertory-study-button";
-          repertoryButton.type = "button";
-          repertoryButton.dataset.repertoryIndex = String(library.repertorios.indexOf(item));
-          repertoryButton.textContent = "Consultar repertório ↗";
-          repertoryButton.setAttribute("aria-label", `Consultar repertório ${item.title}`);
-          card.append(repertoryButton);
-        } else {
-          const arrow = document.createElement("span");
-          arrow.className = "card-arrow";
-          arrow.setAttribute("aria-hidden", "true");
-          arrow.textContent = "↗";
-          card.append(arrow);
-        }
-        return card;
+        card.append(studyButton);
+      } else if (activeCategory === "repertorios") {
+        const repertoryButton = document.createElement("button");
+        repertoryButton.className = "repertory-study-button";
+        repertoryButton.type = "button";
+        repertoryButton.dataset.repertoryIndex = String(library.repertorios.indexOf(item));
+        repertoryButton.textContent = "Consultar repertório ↗";
+        repertoryButton.setAttribute("aria-label", `Consultar repertório ${item.title}`);
+        card.append(repertoryButton);
+      } else {
+        const arrow = document.createElement("span");
+        arrow.className = "card-arrow";
+        arrow.setAttribute("aria-hidden", "true");
+        arrow.textContent = "↗";
+        card.append(arrow);
+      }
+      return card;
     }),
   );
   grid.setAttribute("aria-busy", "false");
@@ -647,6 +663,8 @@ const correctTextButton = document.querySelector("#correct-text");
 const correctedOutput = document.querySelector("#corrected-output");
 const copyCorrectedButton = document.querySelector("#copy-corrected");
 const correctionSummary = document.querySelector("#correction-summary");
+// Aviso inicial do index.html ("A nota é uma estimativa…"), restaurado pelo botão Limpar.
+const avisoEstimativa = correctionSummary.textContent.trim();
 let currentCorrectedText = "";
 
 const competencyTitles = [
@@ -700,7 +718,9 @@ function isAssessmentResponse(result) {
   );
 }
 
-function isTestAssessment(result) {
+// Usa o campo testMode da resposta do servidor; o prefixo do summary continua valendo como alternativa.
+function isTestAssessment(result, modoTesteDaResposta) {
+  if (modoTesteDaResposta === true) return true;
   return typeof result?.summary === "string"
     && result.summary.startsWith("Modo de demonstração:");
 }
@@ -726,10 +746,10 @@ function createAssessmentSection(title, content) {
   return section;
 }
 
-function renderAssessment(result) {
+function renderAssessment(result, modoTesteDaResposta) {
   currentCorrectedText = result.correctedText;
   const score = result.competencies.reduce((total, item) => total + item.score, 0);
-  const testModeActive = isTestAssessment(result);
+  const testModeActive = isTestAssessment(result, modoTesteDaResposta);
   const scoreCard = document.createElement("div");
   scoreCard.className = "assessment-score";
   const scoreDescription = document.createElement("div");
@@ -834,7 +854,8 @@ clearTextButton.addEventListener("click", () => {
     createTextElement("p", "", "A nota por competência e as sugestões aparecerão aqui."),
   );
   correctedOutput.replaceChildren(emptyState);
-  correctionSummary.textContent = "";
+  // Volta ao estado inicial da página: o aviso de que a nota é uma estimativa continua visível e acessível.
+  correctionSummary.textContent = avisoEstimativa;
   copyCorrectedButton.disabled = true;
   textToCorrect.focus();
 });
@@ -883,8 +904,8 @@ correctTextButton.addEventListener("click", async () => {
     if (!payload || !isAssessmentResponse(payload.result)) {
       throw new Error("A resposta do serviço veio incompleta ou em formato inválido. Tente novamente.");
     }
-    renderAssessment(payload.result);
-    if (isTestAssessment(payload.result)) {
+    renderAssessment(payload.result, payload.testMode);
+    if (isTestAssessment(payload.result, payload.testMode)) {
       correctionSummary.textContent = "Resultado de demonstração concluído. Os 880 pontos são fixos e não representam uma avaliação real pelo Gemini.";
     } else if (payload.result.proofreadingUnavailable === true) {
       correctionSummary.textContent = "Avaliação concluída, mas a revisão ortográfica detalhada não pôde ser concluída desta vez; o texto revisado exibido é preliminar. A nota é uma estimativa de estudo, não uma correção oficial do Enem.";

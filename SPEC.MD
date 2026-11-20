@@ -1,6 +1,8 @@
 # Especificação do Projeto — Entrelinhas
 
-> Documento de contexto do projeto. Descreve o estado atual do código (`index.html`, `styles.css`, `script.js`, `server.js`, `test/`) e deve ser mantido em sincronia com ele.
+> Documento de contexto do projeto. Descreve o estado atual do código (`index.html`, `styles.css`, `config.js`, `script.js`, `server.js`, `lib/`, `worker/`, `.github/workflows/` e `test/`) e deve ser mantido em sincronia com ele. Última revisão geral: 19/11/2026.
+>
+> **Em produção:** o site estático fica no GitHub Pages (`https://professoralissonlucas.github.io/entrelinhas/`), publicado por GitHub Actions. A correção com IA roda num Cloudflare Worker, com o modelo `gemini-3.8-flash`. **Localmente,** `npm start` serve o site e a API juntos.
 
 ## 1. Visão geral
 
@@ -52,7 +54,10 @@ Ajudar estudantes a organizar ideias, encontrar repertórios e compreender a qua
 - **API de IA:** Google Gemini (`generativelanguage.googleapis.com/v1beta`, método `generateContent`), chamada via `fetch` nativo;
 - **Modelo padrão:** `gemini-3.8-flash` (configurável). O `gemini-2.5-flash` não está mais disponível para chaves novas (o Google responde 404);
 - **Testes:** executor nativo `node:test` com `node:assert/strict`;
-- **Hospedagem local:** servidor Node.js na porta 3000 por padrão.
+- **Hospedagem:**
+  - site estático no GitHub Pages, publicado pelo GitHub Actions (`.github/workflows/pages.yml`);
+  - API no Cloudflare Worker (`https://entrelinhas-api.professoralisson.workers.dev`, configurado em `config.js`);
+  - localmente, servidor Node.js na porta 3000 por padrão.
 
 O projeto **não possui dependências npm** (nem `dependencies` nem `devDependencies`), framework frontend, banco de dados, bundler ou etapa de build. O carregamento do `.env` é feito por uma função própria (`loadLocalEnv`), sem `dotenv`. O `wrangler`, usado só para publicar o Worker, é executado com `npx`, sem entrar no `package.json`.
 
@@ -80,6 +85,8 @@ affonso/
 ├── .gitignore              # ignora .env, node_modules/, .wrangler/ e .dev.vars
 ├── .github/workflows/
 │   └── pages.yml           # GitHub Actions: roda npm test e publica só os arquivos do site no Pages
+├── README.md               # apresentação para as alunas: o que é, como rodar, como publicar e créditos
+├── CLAUDE.md               # regras permanentes para quem altera o projeto com o Claude Code
 └── SPEC.MD                 # este documento
 ```
 
@@ -124,6 +131,17 @@ npm test    # node --test test/*.test.js
 ```
 
 A aplicação ficará disponível em `http://localhost:3000`.
+
+**Atenção ao `config.js`:**
+- Hoje o `apiBaseUrl` aponta para o Worker. Por isso, mesmo localmente, a correção usa o Worker e a cota do Gemini configurada nele. O Cloudflare aceita a origem `http://localhost:3000`.
+- Para corrigir pelo servidor local, com o `.env`, deixe `apiBaseUrl: ""`.
+
+### Publicação
+
+| Parte | Como publicar | Onde está o passo a passo |
+|---|---|---|
+| Site (GitHub Pages) | Automático a cada push na `main`, se `npm test` passar | Seção 20.2 |
+| API (Cloudflare Worker) | `npx wrangler deploy`, dentro de `worker/` | `worker/README.md` e seção 20.1 |
 
 ## 6. Arquitetura
 
@@ -513,10 +531,12 @@ Ativado por `ENTRELINHAS_TEST_MODE=true` (ou `setTestConfiguration({ testMode: t
 - timeout de 135 segundos;
 - aceita a resposta parcial (`proofreadingUnavailable: true` com `corrections` vazio) e rejeita `proofreadingUnavailable` não booleano ou parcial com correções.
 
-### Backend
+### Backend (núcleo compartilhado: valem para o `server.js` e para o Worker)
 
 | Item | Limite / regra |
 |---|---|
+| Uso por IP (só no Worker) | 10 correções a cada 10 minutos; acima disso, 429 `RATE_LIMITED` |
+| Origens (só no Worker) | `https://professoralissonlucas.github.io` e `http://localhost:3000`; outras recebem 403 `CORS_NOT_ALLOWED` |
 | Corpo da requisição | até 20.000 bytes (413 se exceder) |
 | `Content-Type` | deve conter `application/json` (415 caso contrário) |
 | `theme` | string não vazia, até 1.500 caracteres |
@@ -536,8 +556,10 @@ Ativado por `ENTRELINHAS_TEST_MODE=true` (ou `setTestConfiguration({ testMode: t
 
 Medidas implementadas:
 
-- chave da API permanece no servidor e é enviada ao Gemini por cabeçalho, nunca ao navegador;
-- `.env` listado no `.gitignore`;
+- chave da API permanece no servidor e é enviada ao Gemini por cabeçalho, nunca ao navegador: no modo local, no `.env`; no Worker, no secret `GEMINI_API_KEY` do Cloudflare. O `config.js` e o `wrangler.toml` são públicos, e testes garantem que nenhum dos dois contém chave;
+- `.env`, `.dev.vars` e `.wrangler/` listados no `.gitignore`. Na revisão final (19/11/2026), o histórico completo foi conferido: o `.env` nunca foi versionado e nenhum padrão de chave do Gemini aparece em nenhuma versão de nenhum arquivo;
+- Worker com CORS restrito ao site do GitHub Pages e a `http://localhost:3000`, recusando outras origens antes de chamar o Gemini, e com limite de uso por IP para proteger a cota;
+- GitHub Pages publica só os 5 arquivos do site (workflow com lista explícita); `server.js`, `lib/`, `worker/`, `test/` e `.env` não vão para o site;
 - lista branca de arquivos estáticos (sem acesso arbitrário ao sistema de arquivos);
 - limite de tamanho do corpo e dos campos;
 - exigência de `Content-Type: application/json`;
@@ -555,6 +577,8 @@ Medidas implementadas:
   - os logs nunca contêm a redação, o tema nem a chave; qualquer ocorrência da chave em mensagens do provedor é trocada por `[chave oculta]`.
 
 ## 15. Endpoints e rotas
+
+A API (`/api/correct` e `/api/health`) tem o mesmo comportamento no servidor local e no Worker. O Worker responde também ao `OPTIONS` (preflight de CORS) e não serve arquivos estáticos, que no ar ficam no GitHub Pages. As rotas abaixo são as do servidor local.
 
 | Método | Rota | Resposta |
 |---|---|---|
@@ -661,6 +685,18 @@ Não há testes de frontend com navegador nem testes end-to-end automatizados. O
 
 Os testes que dependem da configuração (como `SERVICE_NOT_CONFIGURED`) a definem via `setTestConfiguration` e a restauram ao final, por isso não dependem do `.env` local.
 
+### Verificações manuais (19/11/2026)
+
+| Verificação | Resultado |
+|---|---|
+| Navegador (Edge headless), modo local: roteiro de 40 passos (três abas, buscas, modal, gêneros, atalho `/`, corretor, Limpar e resposta parcial) | todos os passos passaram, com **0 erros no console** |
+| Navegador, simulação do GitHub Pages em `/entrelinhas/` | página, estilos e scripts carregam por caminhos relativos; a CSP da `<meta>` bloqueia domínios fora da lista; API indisponível mostra a mensagem certa |
+| Gemini real, 12 erros propositais (acentuação, crase, concordância, vírgula, "afim de") | **12 de 12** corrigidos e listados; armadilhas mantidas; avaliação e revisão em paralelo em 62,3 s |
+| `npx wrangler deploy --dry-run` | pacote do Worker gerado (42,92 KiB) e executado com sucesso |
+| **Visual:** `git diff` desde o primeiro commit (`84800d8`) | `styles.css` sem nenhuma diferença; `index.html` só com mudanças invisíveis (CSP em `<meta>`, `<script src="config.js">` e `aria-describedby` corrigido) |
+| **Visual:** capturas de tela no Edge, da versão do primeiro commit e da atual, em desktop (1366 px) e celular (390 px) | **idênticas byte a byte** (mesmo SHA-256) |
+| Segredos: busca por padrões de chave em todas as versões de todos os arquivos do histórico | nenhuma ocorrência; `.env` nunca versionado |
+
 ## 18. Identidade visual
 
 Identidade editorial e acolhedora, definida por variáveis CSS em `:root`:
@@ -701,26 +737,18 @@ Características:
 
 ## 20. Pontos de atenção observados no código
 
-**Itens corrigidos (19/11/2026), sem alteração visual:**
+Todos os problemas apontados na análise inicial do código foram corrigidos, sem alteração visual: acessibilidade, botão Limpar, busca, modo demonstração, teste sem efeito, falhas na chamada ao Gemini e na revisão. O histórico está no git. Ficam em aberto:
 
-- `aria-describedby` do campo da redação agora aponta para o contador real (`character-count`). Um teste verifica que todo id referenciado por `aria-describedby`, `aria-labelledby`, `aria-controls` e `for` existe e é único;
-- o botão **Limpar** restaura o aviso "A nota é uma estimativa para estudo, não uma correção oficial do Enem." no status (`role="status"`). O texto é lido do próprio `index.html` na carga da página (`avisoEstimativa`), para não haver duas cópias;
-- `theme-study-button` só é criado nos cartões da aba Temas;
-- o modo demonstração é detectado pelo campo `testMode` da resposta; o prefixo "Modo de demonstração:" do `summary` continua como alternativa;
-- a busca de repertórios inclui os campos detalhados (`whatIs`, `origin`, `context`, `centralIdea`, `societyRelation`, `howToUse`, `applicationExample`, `attention` e `axes`), por meio das funções `normalizarTextoBusca` e `textoPesquisavel`;
-- o teste que não exercitava código da aplicação foi substituído por um que valida os seis níveis de nota (e a rejeição de valores inválidos) com `validateAssessment` e `normalizarAvaliacao`;
-- `GET /favicon.ico` responde 204, eliminando o único erro que aparecia no console do navegador (404 do ícone pedido automaticamente).
-
-**Verificação no navegador (Edge headless, 19/11/2026):** um roteiro de 40 passos percorreu as três abas, as buscas (com e sem acento, por campo detalhado e por eixo, além do estado vazio), o modal (tese, link para repertório, copiar, fechar por Esc, por clique no fundo e pelo ×), os três gêneros, o atalho `/` e o corretor (validações, contador, modo demonstração, copiar, Limpar e resposta parcial com Gemini simulado). Todos os passos passaram, com **0 erros ou avisos no console**.
-
-**Itens ainda em aberto:**
-
-- o vínculo tema → repertório depende da semelhança textual entre `titulo` e `title`;
-- o `README` não existe; este SPEC é a principal documentação;
-- o motivo (`reason`) é texto gerado pela IA; o prompt pede que siga a norma-padrão, mas ele não é revisado pelo servidor (antes dessa instrução, apareceu "grafase" em vez de "grafa-se");
-- a avaliação em si não tem nova tentativa: um 503 nela ainda gera erro para a aluna;
-- **cota do plano gratuito:** a chave atual tem **20 requisições por dia por modelo** no `gemini-3.8-flash`, e cada avaliação usa 2, o que dá cerca de 10 redações por dia para todos os usuários. O `gemini-3.7-flash` é encaminhado para o 3.8 e divide a mesma cota. Também há limite por minuto: pedidos simultâneos de alunas diferentes podem receber 429;
-- **latência do plano gratuito:** a fila no Google variou de 35 s a 112 s mesmo para respostas de 1 token; o tempo de 2 minutos anunciado no status reflete esse cenário.
+| Ponto | Impacto | Sugestão |
+|---|---|---|
+| **Cota do plano gratuito do Gemini:** 20 requisições por dia por modelo no `gemini-3.8-flash`; cada avaliação usa 2, o que dá cerca de 10 redações por dia para todos os usuários. O `gemini-3.7-flash` é encaminhado para o 3.8 e divide a mesma cota. Há também limite por minuto. | Alto, para uso em sala | Ativar o faturamento no AI Studio (nível 1) |
+| **Latência do plano gratuito:** a fila no Google variou de 35 s a 112 s, mesmo para 1 token de saída. | Médio: a aluna pode esperar até 2 minutos, como avisa o status | O plano pago costuma reduzir a fila |
+| **A avaliação não tem nova tentativa:** só a revisão é repetida em 429/503. Um 503 na avaliação gera erro. | Médio | Repetir 1 vez também a avaliação, respeitando o prazo total |
+| **Limite por IP aproximado sem o KV:** sem o KV `LIMITE_USO`, cada instância do Worker conta separadamente. | Baixo a médio | Seguir o passo opcional do `worker/README.md` |
+| **Motivo (`reason`) não revisado:** é gerado pela IA; o prompt pede a norma-padrão, mas o servidor não confere. | Baixo | — |
+| **Vínculo tema → repertório:** depende da semelhança textual entre `titulo` e `title` (hoje os 7 vínculos estão corretos). | Baixo | Usar um identificador fixo nos dados |
+| **404 de `/favicon.ico` no GitHub Pages:** o navegador procura o ícone na raiz do domínio. Aparece só no console. | Baixo | `<link rel="icon" href="data:,">`, se for aceitável mexer no `<head>` |
+| **Fechar a página no meio da avaliação (Worker):** comportamento não documentado pelo Cloudflare. | Baixo | Observar nos logs após o deploy |
 
 ## 20.1 Cloudflare Worker (`worker/`)
 
@@ -807,12 +835,11 @@ Versões das actions conferidas na API do GitHub em 19/11/2026.
 - biblioteca fixa no código (6 temas, 6 repertórios, 3 gêneros);
 - não gera PDF nem exporta resultados além da cópia do texto revisado;
 - não possui tema escuro;
-- correção real depende da API do Gemini e de internet;
+- correção real depende da API do Gemini, de internet e da cota da chave (ver seção 20);
 - a nota não é validada com correção oficial de banca;
-- não há testes de frontend nem end-to-end;
+- não há testes automatizados de frontend com navegador nem end-to-end no `npm test`; o navegador foi verificado com roteiros manuais (seção 17);
 - não há build, minificação ou cache de longo prazo dos estáticos;
 - limite de uso por IP só no Worker (10 correções a cada 10 minutos); o servidor local (`npm start`) não limita;
-- sem o KV `LIMITE_USO`, o limite do Worker fica na memória de cada instância e é aproximado;
 - apenas português brasileiro.
 
 ## 22. Possíveis evoluções
@@ -824,8 +851,9 @@ Versões das actions conferidas na API do GitHub em 19/11/2026.
 - painel para professores e turmas;
 - mais vestibulares, gêneros e temas;
 - edição administrativa da biblioteca;
-- testes de frontend e end-to-end;
-- rate limiting e telemetria técnica sem dados sensíveis;
+- testes de frontend e end-to-end automatizados no GitHub Actions;
+- nova tentativa também na avaliação e limite global diário no Worker, para repartir a cota entre as turmas;
+- telemetria técnica sem dados sensíveis;
 - provedor de IA alternativo;
 - tema escuro e melhorias de acessibilidade;
 - cache ou modo offline para a biblioteca.
@@ -834,16 +862,21 @@ Versões das actions conferidas na API do GitHub em 19/11/2026.
 
 Uma implementação do projeto deve:
 
-- servir a página principal em `/`;
-- oferecer busca funcional, insensível a acentos, nas categorias Temas e Repertórios;
-- apresentar os três guias de gêneros textuais com dicas por banca;
-- abrir o painel de teses/repertórios de um tema e o detalhe pedagógico de um repertório;
-- exigir tema e redação antes da correção e respeitar os limites de caracteres;
-- calcular e exibir uma nota entre 0 e 1.000 com cinco competências;
-- preservar o conteúdo da redação na versão corrigida e listar as correções feitas;
-- informar que a nota é apenas uma estimativa;
-- funcionar sem expor a chave da API no navegador;
-- funcionar em modo de demonstração sem chave quando `ENTRELINHAS_TEST_MODE=true`;
-- retornar mensagens de erro compreensíveis com os códigos documentados;
-- passar em `npm test`;
-- manter a navegação e os estados visuais acessíveis.
+1. servir a página principal em `/` (localmente) e em `/entrelinhas/` (GitHub Pages);
+2. oferecer busca funcional, insensível a acentos, nas categorias Temas e Repertórios;
+3. apresentar os três guias de gêneros textuais com dicas por banca;
+4. abrir o painel de teses/repertórios de um tema e o detalhe pedagógico de um repertório;
+5. exigir tema e redação antes da correção e respeitar os limites de caracteres;
+6. calcular e exibir uma nota entre 0 e 1.000 com cinco competências;
+7. preservar o conteúdo da redação na versão corrigida e listar as correções feitas;
+8. informar que a nota é apenas uma estimativa;
+9. funcionar sem expor a chave da API no navegador nem no repositório;
+10. funcionar em modo de demonstração sem chave quando `ENTRELINHAS_TEST_MODE=true`;
+11. retornar mensagens de erro compreensíveis com os códigos documentados;
+12. passar em `npm test`;
+13. manter a navegação e os estados visuais acessíveis;
+14. usar o modelo `gemini-3.8-flash` por padrão, sem corte da resposta por `MAX_TOKENS`;
+15. ter o mesmo comportamento da API no servidor local e no Worker, com a lógica num único módulo;
+16. no Worker, aceitar só as origens permitidas (CORS e preflight) e limitar o uso por IP;
+17. publicar no GitHub Pages, após os testes, somente os arquivos do site;
+18. manter o visual idêntico ao original.

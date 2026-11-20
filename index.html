@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Explore temas de redação, gêneros textuais e repertórios para se preparar para o vestibular."
+    />
+    <title>Entrelinhas — seu banco de redação</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#" aria-label="Entrelinhas, página inicial">
+        <span class="brand-mark" aria-hidden="true">e.</span>
+        <span>entrelinhas</span>
+      </a>
+      <span class="header-note">Seu próximo argumento começa aqui.</span>
+      <a class="header-link" href="#biblioteca">Explorar biblioteca <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="eyebrow-dot"></span> REPERTÓRIO PARA IR MAIS LONGE</p>
+          <h1 id="hero-title">Ideias que viram<br /><span>grandes redações.</span></h1>
+          <p class="hero-description">
+            Um espaço para encontrar inspiração, organizar argumentos e escrever com mais confiança no vestibular.
+          </p>
+          <a class="hero-button" href="#biblioteca">Encontrar inspiração <span aria-hidden="true">↓</span></a>
+        </div>
+        <div class="hero-art" aria-hidden="true">
+          <div class="art-orbit orbit-one"></div>
+          <div class="art-orbit orbit-two"></div>
+          <div class="art-note">
+            <span class="note-label">LEMBRETE DO DIA</span>
+            <span class="note-quote">“Escrever é<br />pensar em voz alta.”</span>
+            <span class="note-author">— com intenção e repertório</span>
+            <span class="note-sparkle">✳</span>
+          </div>
+          <span class="art-sparkle sparkle-one">✳</span>
+          <span class="art-sparkle sparkle-two">✦</span>
+        </div>
+        <div class="hero-index" aria-hidden="true"><span>01</span> / 03</div>
+      </section>
+
+      <section class="text-corrector" id="correcao" aria-labelledby="corrector-title">
+        <div class="corrector-heading">
+          <div>
+            <p class="eyebrow section-eyebrow">CORREÇÃO COM INTELIGÊNCIA ARTIFICIAL</p>
+            <h2 id="corrector-title">Entenda os pontos fortes da sua redação.</h2>
+            <p class="section-description">Corrija ortografia, gramática e pontuação; receba uma estimativa pelas cinco competências do Enem.</p>
+          </div>
+          <span class="corrector-badge" aria-label="Assistente disponível">IA <span aria-hidden="true">✦</span></span>
+        </div>
+
+        <div class="corrector-workspace">
+          <div class="editor-panel">
+            <div class="panel-heading">
+              <label for="essay-theme">Proposta de redação</label>
+              <button class="text-action" id="clear-text" type="button">Limpar</button>
+            </div>
+            <textarea id="essay-theme" placeholder="Cole o tema e as instruções da proposta para uma avaliação mais precisa..." maxlength="1500" aria-describedby="theme-hint theme-character-count" aria-required="true"></textarea>
+            <p class="field-hint" id="theme-hint">Necessário para avaliar se o texto atende ao tema e ao gênero solicitado.</p>
+            <span class="visually-hidden" id="theme-character-count">0 de 1500 caracteres</span>
+            <div class="panel-heading essay-heading">
+              <label for="text-to-correct">Sua redação</label>
+            </div>
+            <textarea id="text-to-correct" placeholder="Cole ou escreva sua redação aqui..." maxlength="5000" aria-required="true" aria-describedby="essay-character-count"></textarea>
+            <div class="editor-footer">
+              <span id="character-count">0 caracteres</span>
+              <button class="correct-button" id="correct-text" type="button">
+                Avaliar redação <span aria-hidden="true">✦</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="result-panel">
+            <div class="panel-heading">
+              <span>Correção e devolutiva da IA</span>
+              <button class="text-action" id="copy-corrected" type="button" disabled>Copiar versão revisada</button>
+            </div>
+            <div class="corrected-output" id="corrected-output" aria-live="polite">
+              <div class="empty-correction">
+                <span aria-hidden="true">✦</span>
+                <p>A nota por competência e as sugestões aparecerão aqui.</p>
+              </div>
+            </div>
+            <div class="correction-summary" id="correction-summary" role="status" aria-live="polite">
+              A nota é uma estimativa para estudo, não uma correção oficial do Enem.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="library" id="biblioteca" aria-labelledby="library-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow section-eyebrow">CAIXA DE FERRAMENTAS</p>
+            <h2 id="library-title">Sua próxima ideia está aqui.</h2>
+            <p class="section-description">Explore, conecte referências e encontre seu ponto de partida.</p>
+          </div>
+          <span class="library-stamp" aria-hidden="true">PENSE<br />· ESCREVA ·<br />REVISE</span>
+        </div>
+
+        <div class="library-controls">
+          <nav class="tabs" aria-label="Categorias da biblioteca">
+            <button class="tab is-active" type="button" data-category="temas" aria-pressed="true">Temas</button>
+            <button class="tab" type="button" data-category="generos" aria-pressed="false">Gêneros textuais</button>
+            <button class="tab" type="button" data-category="repertorios" aria-pressed="false">Repertórios</button>
+          </nav>
+          <label class="search-box">
+            <span class="search-icon" aria-hidden="true">⌕</span>
+            <span class="visually-hidden">Buscar na categoria</span>
+            <input id="search-input" type="search" placeholder="Buscar inspiração..." autocomplete="off" />
+            <kbd>/</kbd>
+          </label>
+        </div>
+
+        <div class="results-meta">
+          <p id="results-label">TEMAS PARA EXPLORAR</p>
+          <span id="results-count" aria-live="polite"></span>
+        </div>
+        <div class="content-grid" id="content-grid" aria-live="polite" aria-busy="false"></div>
+        <p class="empty-state" id="empty-state" hidden>Nenhum resultado por aqui. Tente outra busca.</p>
+        <section class="genre-guide" id="genre-guide" aria-labelledby="genre-guide-title" hidden>
+          <div class="genre-guide-heading">
+            <div>
+              <p class="eyebrow section-eyebrow">GUIA DE GÊNEROS TEXTUAIS</p>
+              <h3 id="genre-guide-title">Formato certo, argumento forte.</h3>
+              <p>Selecione um gênero para consultar sua estrutura e dicas para cada vestibular.</p>
+            </div>
+          </div>
+          <div class="genre-selector" id="genre-selector" role="group" aria-label="Escolha um gênero textual"></div>
+          <div class="genre-detail" id="genre-detail" aria-live="polite"></div>
+          <p class="genre-note">As orientações são um guia de estudo: leia sempre a proposta da prova e siga o gênero e as instruções solicitadas.</p>
+        </section>
+      </section>
+    </main>
+
+    <dialog class="theme-dialog" id="theme-dialog" aria-labelledby="theme-dialog-title">
+      <div class="theme-dialog-header">
+        <div>
+          <p class="eyebrow section-eyebrow">AUXÍLIO COM ARGUMENTOS E REPERTÓRIOS</p>
+          <h2 id="theme-dialog-title"></h2>
+        </div>
+        <button class="dialog-close" id="theme-dialog-close" type="button" aria-label="Fechar painel">×</button>
+      </div>
+      <div class="theme-dialog-content" id="theme-dialog-content"></div>
+      <p class="copy-status" id="copy-status" role="status" aria-live="polite"></p>
+    </dialog>
+
+    <footer class="site-footer">
+      <a class="brand footer-brand" href="#" aria-label="Entrelinhas, voltar ao início">
+        <span class="brand-mark" aria-hidden="true">e.</span>
+        <span>entrelinhas</span>
+      </a>
+      <p>Escreva o seu caminho. <span aria-hidden="true">✳</span></p>
+      <span class="footer-caption">FEITO PARA QUEM TEM O QUE DIZER</span>
+    </footer>
+  </body>
+</html>

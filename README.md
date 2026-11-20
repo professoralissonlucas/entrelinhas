@@ -76,7 +76,7 @@ Para mexer no projeto, leia antes o [`SPEC.MD`](SPEC.MD), que explica tudo em de
 ## Créditos
 
 - **Projeto e orientação:** [@professoralissonlucas](https://github.com/professoralissonlucas)
-- **Turma:** _(adicione aqui os nomes de quem participou)_
+- **Turma:** _Bruna Affonso e Maria Fernanda_
 - **Correção com IA:** [Google Gemini](https://ai.google.dev/) (modelo `gemini-3.8-flash`)
 - **Hospedagem:** [GitHub Pages](https://pages.github.com/) (site) e [Cloudflare Workers](https://workers.cloudflare.com/) (correção)
 - **Fontes:** [Manrope](https://fonts.google.com/specimen/Manrope) e [DM Sans](https://fonts.google.com/specimen/DM+Sans), via Google Fonts (licença SIL Open Font License)
